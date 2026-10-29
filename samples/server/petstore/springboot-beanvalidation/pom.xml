@@ -4,7 +4,7 @@
     <artifactId>spring-boot-beanvalidation</artifactId>
     <packaging>jar</packaging>
     <name>spring-boot-beanvalidation</name>
-    <version>1.0.0</version>
+    <version>7.27.0-oas32-preview.1</version>
     <properties>
         <java.version>17</java.version>
         <maven.compiler.release>${java.version}</maven.compiler.release>

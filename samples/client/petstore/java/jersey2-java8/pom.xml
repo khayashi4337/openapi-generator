@@ -5,7 +5,7 @@
     <artifactId>petstore-jersey2-java8</artifactId>
     <packaging>jar</packaging>
     <name>petstore-jersey2-java8</name>
-    <version>1.0.0</version>
+    <version>7.27.0-oas32-preview.1</version>
     <url>https://github.com/openapitools/openapi-generator</url>
     <description>OpenAPI Java</description>
     <scm>

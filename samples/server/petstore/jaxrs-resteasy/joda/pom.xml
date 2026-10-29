@@ -5,7 +5,7 @@
     <artifactId>jaxrs-resteasy-joda-server</artifactId>
     <packaging>war</packaging>
     <name>jaxrs-resteasy-joda-server</name>
-    <version>1.0.0</version>
+    <version>7.27.0-oas32-preview.1</version>
 
     <build>
         <sourceDirectory>src/main/java</sourceDirectory>
