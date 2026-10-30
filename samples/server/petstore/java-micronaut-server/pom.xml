@@ -4,7 +4,7 @@
     <modelVersion>4.0.0</modelVersion>
     <groupId>org.openapitools</groupId>
     <artifactId>petstore-micronaut-server</artifactId>
-    <version>7.27.0-oas32-preview.1</version>
+    <version>7.27.0-oas32-preview.2</version>
     <packaging>${packaging}</packaging>
 
     <parent>

@@ -5,7 +5,7 @@
   <packaging>war</packaging>
   <name>openapi-cxf-server</name>
   <description>This spec is mainly for testing Petstore server and contains fake endpoints, models. Please do not use this for any other purpose. Special characters: \&quot; \\</description>
-  <version>7.27.0-oas32-preview.1</version>
+  <version>7.27.0-oas32-preview.2</version>
 
 
   <build>

@@ -9,7 +9,7 @@
   <artifactId>java-msf4j-server</artifactId>
   <packaging>jar</packaging>
   <name>java-msf4j-server</name>
-  <version>7.27.0-oas32-preview.1</version>
+  <version>7.27.0-oas32-preview.2</version>
   <build>
     <sourceDirectory>src/main/java</sourceDirectory>
     <plugins>
