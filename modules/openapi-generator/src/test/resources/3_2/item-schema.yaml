@@ -194,6 +194,93 @@ paths:
                     type: string
                   ts:
                     type: integer
+  /events/subscribe2:
+    post:
+      operationId: subscribe2Events
+      tags:
+        - alpha
+        - beta
+      callbacks:
+        onData:
+          '{$request.body#/callbackUrl}':
+            post:
+              responses:
+                '200':
+                  description: pushed events
+                  content:
+                    text/event-stream:
+                      itemSchema:
+                        $ref: '#/components/schemas/Event'
+      responses:
+        '202':
+          description: subscribed
+  /events/internal-stream:
+    get:
+      operationId: internalStreamEvents
+      x-internal: true
+      responses:
+        '200':
+          description: stream-only, but internal
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+  /events/custom-stream:
+    get:
+      operationId: streamEventsCustom
+      responses:
+        '200':
+          description: stream carried by an unrecognised sequential media type
+          content:
+            application/vnd.custom-seq:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+  /events/filtered-stream:
+    get:
+      operationId: filteredStreamEvents
+      responses:
+        '200':
+          description: stream-only method response
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+        '404':
+          description: inline oneOf property that preprocessOpenAPI must never visit
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  choice:
+                    oneOf:
+                      - type: string
+                      - type: integer
+  /events/plain-inline:
+    get:
+      operationId: plainInline
+      responses:
+        '200':
+          description: ordinary operation whose inline oneOf preprocessOpenAPI marks
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  choice:
+                    oneOf:
+                      - type: string
+                      - type: integer
+  /events/audit:
+    query:
+      operationId: queryEventsAudit
+      responses:
+        '200':
+          description: additionalOperation carried only by a stream
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
 webhooks:
   newEvents:
     post:

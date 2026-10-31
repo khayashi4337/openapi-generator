@@ -5,6 +5,10 @@
 **Deciders:** khayashi4337（PR作者）
 **関連ブランチ:** openapi-3.2-streaming（openapi-3.2-codegenから分岐）
 
+> 文中の「Fable」「Codex」は、設計を検証した独立した2つのレビュー（別のモデル）を指す。
+> 実装コミット: itemSchema土台=`7d4150558c6`、レビュー修正=`7a01e726153`、
+> capability+warn/skipと印=`9acffc5d04d`（+そのレビュー修正として後続コミット）。
+
 ## Context
 
 OpenAPI 3.2は`MediaType.itemSchema`（ストリーム内の各要素のスキーマ）、`Encoding.itemEncoding`/
@@ -49,9 +53,9 @@ Fable単独のレビュー時点では「劣化生成（raw string/binaryとし�
 不正だが、同程度に深刻（ハングはユーザーから見れば停止したように見える障害）。
 Fableの「劣化生成+warning」という大枠の判断基準（既存のskip方針の理由＝ワイヤー上で誤るか否か、
 を一貫させる）自体は妥当だが、「劣化生成」の具体的な実装（文字列として読み切る）が
-SSEに対して安全でないことまでは検証していなかった。Codexが指摘した「判定単位を
-generator/library/方向/media type単位にする」「無いときはwarn+skip、rawは明示オプション」
-という、より保守的な既定値を採用する。
+SSEに対して安全でないことまでは検証していなかった。もう一方の独立レビューが指摘した
+「判定単位をgenerator/library/方向/media type単位にする」「無いときはwarn+skip、
+rawは明示オプション」という、より保守的な既定値を採用する。
 
 ## Options Considered（論点1: ゲーティング方針）
 
@@ -115,9 +119,9 @@ generator/library/方向/media type単位にする」「無いときはwarn+skip
 ## Trade-off Analysis（論点1）
 
 当初Fableのレビューのみで「劣化生成」に決めかけたが、Codexの独立レビューで**正しさの欠陥**
-（SSEでのハング）が見つかり訂正した。これは「2人以上の独立レビューを経ないまま設計を
-確定しない」という本セッション全体の規律が実際に機能した例（Fable単独では見えていなかった
-問題をCodexが発見）。最終的な判断基準は以下で一貫させる:
+（SSEでのハング）が見つかり訂正した。これは「2以上の独立したレビューを経ないまま設計を
+確定しない」という規律が実際に機能した例（一方のレビューだけでは見えていなかった
+問題をもう一方が発見）。最終的な判断基準は以下で一貫させる:
 
 - 「黙って壊れる」(ワイヤー上で値を破壊する、ハングする)ならskip
 - 「正しいが不便」(型が薄い、劣化表現になる)なら、ユーザーが明示的に選んだ場合のみ許可
@@ -150,7 +154,7 @@ generator/library/方向/media type単位にする」「無いときはwarn+skip
 
 ### Option C: Rust/Kotlin/C#
 
-**Cons:** ビルド環境が重い（dev-env、kotlinc/cargo/dotnet）。このセッションで何度も
+**Cons:** ビルド環境が重い（dev-env、kotlinc/cargo/dotnet）。開発環境で繰り返し
 dev-env障害（USB切断・メモリ確保失敗）を経験しており、パイロット段階の高速な反復には
 向かない
 
@@ -204,31 +208,37 @@ JS/TSの`ReadableStream`/`AsyncIterable`はストリーミングとの適合度�
    (コンストラクタ・equals・hashCodeも拡張、Codex指摘)
    → 実施済 (7d4150558c6)。equals・hashCode・toString・getter/setter は拡張したが、
    コンストラクタは拡張しなかった: 既存コンストラクタのシグネチャを変えると
-   言語別ジェネレータや外部呼び出し側を壊すため、issue #62 の指示どおり setter 追加に留めた
+   言語別ジェネレータや外部呼び出し側を壊すため、当該コミットの方針どおり setter 追加に留めた
 2. [x] `ModelUtils.getSchemaFromContent`等、itemSchemaを見ていない既存箇所を修正
    （`getSchemaFromContent:1482`、`visitContent:315-323`、`InlineModelResolver.flattenContent:587-610`、
-   `OpenAPINormalizer.normalizeContent:556-571`、`axisOf:1209-1216`。Fable/Codex両方が指摘、要個別確認）
-   → 実施済 (7d4150558c6 + A1bレビュー修正)。列挙5箇所すべて変更。加えて `rewriteContentRefs`
+   `OpenAPINormalizer.normalizeContent:556-571`、`axisOf:1209-1216`。両レビューが指摘、要個別確認）
+   → 実施済 (7d4150558c6 + レビュー修正 7a01e726153)。列挙5箇所すべて変更。加えて `rewriteContentRefs`
    (重複排除後の$ref書き換え)、`getContentType`/`addConsumesInfo`/`getConsumesInfo`/
    `addProducesInfo`/`getProducesInfo`（送受信 media type を選択 schema と一致させる
    フォールバック = ストリーム対応前の中間状態）も itemSchema 対応済み
 3. [x] `CodegenConfig.supportsStreamingResponses()` capability追加（default false）。
    判定はmedia type単位（Decision参照）
-   → 実施済。`CodegenConfig` に default false で追加。stream-only 判定は
-   `ModelUtils.streamOnlyMediaTypes`/`streamOnlyMethodResponseMediaTypes`/
+   → 実施済 (9acffc5d04d + レビュー修正コミット)。`CodegenConfig` に default false で追加。
+   stream-only 判定は `ModelUtils.streamOnlyMediaTypes`/`streamOnlyMethodResponseMediaTypes`/
    `streamOnlyRequestBodyMediaTypes` に集約し、`DefaultGenerator.processOperation`
    （paths/webhooks/additional operations/variants の合流点）、
    `DefaultCodegen.fromCallback`、`preprocessOpenAPI`、
-   `InlineModelResolver.addOperationEntries` の各経路で同一判定を適用
+   `InlineModelResolver.addOperationEntries` の各経路で同一判定を適用。
+   レビュー修正: K6ClientCodegen の独自パス走査にも同じゲートを適用（他 generator の
+   同型迂回は調査済み・該当なし）、callback 警告は親 operation・callback 名・式で
+   重複排除、content-type variant の stream-only 再入は警告なしでスキップ、
+   x-internal フィルタを stream-only 判定より先に実施、成功レスポンス選択を
+   `ModelUtils.methodResponseCode` に一元化
    （MergedSpecBuilder は spec マージ層で capability を持たず、下流に委譲）
 4. [~] `DefaultCodegen.fromResponse`/`handleMethodResponse`/`fromRequestBody`に、
    (a)対応時は型付き逐次APIを生成 (b)非対応時は代替schemaへフォールバック、無ければwarn+skip
    (c)raw公開・全件バッファリングは明示オプション、のロジックを実装
-   → (b) 実施済: 代替 schema があれば従来どおり生成、無ければ warn+skip
+   → (b) 実施済 (9acffc5d04d): 代替 schema があれば従来どおり生成、無ければ warn+skip
    （request body の stream-only は capability にかかわらず warn+skip）。
-   (a) は `CodegenOperation` の印（`isStreamingResponse`/`streamingMediaType`/
-   `streamingFormat`/`streamingItemType`）まで。言語別の逐次API生成は item 6 以降。
-   (c) は未実施（将来の明示オプションとして残す）
+   (a) の印付けも実施済: `CodegenOperation` の `isStreamingResponse`/`streamingMediaType`/
+   `streamingFormat`/`streamingItemType`（対応 generator が読むメタデータ）。
+   言語別の逐次API生成そのものは将来の作業（item 6 以降）。
+   (c) は本タスクの範囲外（将来の明示オプションとして残す）
 5. [ ] swagger-parser側の`ResponseProcessor`等が`itemSchema`内の外部`$ref`を解決していない
    問題を確認・必要なら上流フォークに修正を依頼（Fable指摘、Verified by grep）
 6. [ ] Pythonでnative実装のプロトタイプ（JSONLを先に、次にSSEパーサ + 新規ワイヤー検証ハーネス）

@@ -2883,8 +2883,8 @@ public class DefaultCodegenTest {
     public void itemSchemaOnlyResponseWarnsAndCarriesItemSchema() {
         // 3.2: a response whose content is only application/jsonl + itemSchema declares no
         // 'schema' at all: the return type stays void, a warning names the media type whose
-        // itemSchema is not used for code generation yet, and the item schema itself is
-        // still exposed on the CodegenMediaType.
+        // itemSchema is not used for the response's regular schema, and the item schema
+        // itself is still exposed on the CodegenMediaType.
         ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
         listAppender.start();
         testLogger.addAppender(listAppender);
@@ -3498,6 +3498,34 @@ public class DefaultCodegenTest {
         Optional<CodegenParameter> passwordParameter = operation.formParams.stream().filter(p -> "password".equals(p.paramName)).findFirst();
         assertTrue(passwordParameter.isPresent());
         assertTrue(passwordParameter.get().isPassword);
+    }
+
+    @Test
+    public void preprocessOpenAPISkipsStreamOnlyOperations() {
+        // useOneOfInterfaces visits every operation schema to mark inline oneOf
+        // blocks; stream-only operations are excluded from that traversal so
+        // their non-method responses stay untouched
+        // unflattened: the operation schemas must stay inline for the traversal to
+        // collect (or exclude) them
+        final OpenAPI openAPI = TestUtils.parseSpec("src/test/resources/3_2/item-schema.yaml");
+        final var codegen = new DefaultCodegen() {
+            java.util.List<String> oneOfInterfaceNames() {
+                return addOneOfInterfaces.stream().map(m -> m.name).collect(Collectors.toList());
+            }
+        };
+        codegen.setOpenAPI(openAPI);
+        codegen.setUseOneOfInterfaces(true);
+        codegen.preprocessOpenAPI(openAPI);
+
+        // an ordinary operation's inline oneOf property produces an interface model…
+        assertTrue(codegen.oneOfInterfaceNames().stream()
+                        .anyMatch(n -> n.toLowerCase(Locale.ROOT).contains("plaininline")),
+                "preprocessOpenAPI visits a kept operation's inline oneOf: " + codegen.oneOfInterfaceNames());
+        // …while a stream-only operation is excluded, so its 404 oneOf property is
+        // never collected and no interface model is planned for it
+        assertFalse(codegen.oneOfInterfaceNames().stream()
+                        .anyMatch(n -> n.toLowerCase(Locale.ROOT).contains("filteredstream")),
+                "a stream-only operation is excluded from the useOneOfInterfaces traversal");
     }
 
     @Test

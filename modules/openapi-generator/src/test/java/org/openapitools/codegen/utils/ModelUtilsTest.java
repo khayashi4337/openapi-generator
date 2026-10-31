@@ -17,12 +17,15 @@
 
 package org.openapitools.codegen.utils;
 
+import io.swagger.v3.oas.models.Components;
 import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.SpecVersion;
 import io.swagger.v3.oas.models.media.*;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
+import io.swagger.v3.oas.models.responses.ApiResponses;
 import org.openapitools.codegen.TestUtils;
 import org.testng.Assert;
 import org.testng.annotations.Test;
@@ -1478,6 +1481,51 @@ public class ModelUtilsTest {
         io.swagger.v3.oas.models.Operation list = openAPI.getPaths().get("/events").getGet();
         assertTrue(ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, list).isEmpty(),
                 "the regular-schema fallback keeps the operation ordinary");
+    }
+
+    @Test
+    public void testMethodResponseCodeSelection() {
+        // canonical selection: lexicographically lowest 2xx, else "default", else null
+        ApiResponses responses = new ApiResponses();
+        responses.addApiResponse("204", new ApiResponse());
+        responses.addApiResponse("202", new ApiResponse());
+        responses.addApiResponse("200", new ApiResponse());
+        assertEquals(ModelUtils.methodResponseCode(responses), "200",
+                "the lexicographically lowest 2xx wins regardless of declaration order");
+
+        ApiResponses withDefault = new ApiResponses();
+        withDefault.addApiResponse("default", new ApiResponse());
+        withDefault.addApiResponse("201", new ApiResponse());
+        assertEquals(ModelUtils.methodResponseCode(withDefault), "201",
+                "a 2xx response beats the default response");
+
+        ApiResponses onlyDefault = new ApiResponses();
+        onlyDefault.addApiResponse("404", new ApiResponse());
+        onlyDefault.addApiResponse("default", new ApiResponse());
+        assertEquals(ModelUtils.methodResponseCode(onlyDefault), "default");
+
+        ApiResponses noSuitable = new ApiResponses();
+        noSuitable.addApiResponse("404", new ApiResponse());
+        assertNull(ModelUtils.methodResponseCode(noSuitable));
+        assertNull(ModelUtils.methodResponseCode(null));
+        assertNull(ModelUtils.methodResponseCode(new ApiResponses()));
+    }
+
+    @Test
+    public void testStreamOnlyMethodResponseMediaTypesResolvesRefResponse() {
+        // a method response reached through a $ref must still expose its
+        // itemSchema-only media types
+        MediaType stream = new MediaType()
+                .itemSchema(new ObjectSchema());
+        ApiResponse referenced = new ApiResponse()
+                .content(new Content().addMediaType("application/jsonl", stream));
+        Operation op = new Operation().responses(new ApiResponses()
+                .addApiResponse("200", new ApiResponse().$ref("#/components/responses/StreamOk")));
+        OpenAPI openAPI = new OpenAPI().components(new Components()
+                .addResponses("StreamOk", referenced));
+
+        assertEquals(ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, op),
+                List.of("application/jsonl"));
     }
 
 }

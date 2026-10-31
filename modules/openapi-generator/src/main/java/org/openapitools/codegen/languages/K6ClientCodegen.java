@@ -531,6 +531,23 @@ public class K6ClientCodegen extends DefaultCodegen implements CodegenConfig {
                     continue;
                 }
 
+                // OAS 3.2 sequential media types (itemSchema): this scan bypasses
+                // processOperation, so the same stream-only gate is applied here —
+                // a stream-only request body always, a stream-only method response
+                // unless the generator supports streaming responses
+                List<String> streamOnlyBodyMediaTypes = ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, operation);
+                if (!streamOnlyBodyMediaTypes.isEmpty()) {
+                    LOGGER.warn("{} {} declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output", method.name().toUpperCase(Locale.ROOT), path, streamOnlyBodyMediaTypes);
+                    continue;
+                }
+                if (!supportsStreamingResponses()) {
+                    List<String> streamOnlyMediaTypes = ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, operation);
+                    if (!streamOnlyMediaTypes.isEmpty()) {
+                        LOGGER.warn("{} {} returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output", method.name().toUpperCase(Locale.ROOT), path, streamOnlyMediaTypes, getName());
+                        continue;
+                    }
+                }
+
                 OptionalInt operationGroupingOrder = OptionalInt.empty();
 
                 String operationId = operation.getOperationId();
@@ -953,6 +970,15 @@ public class K6ClientCodegen extends DefaultCodegen implements CodegenConfig {
                 // HttpMethod.QUERY is in the enum map too - skip it for
                 // generators that cannot emit the 3.2 operations
                 if (method == PathItem.HttpMethod.QUERY && !supportsAdditionalOperations()) {
+                    continue;
+                }
+
+                // OAS 3.2 sequential media types (itemSchema): same stream-only
+                // gate as the request-group scan above — processOperation already
+                // reports the warning for these operations
+                if (!ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, operation).isEmpty()
+                        || (!supportsStreamingResponses()
+                            && !ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, operation).isEmpty())) {
                     continue;
                 }
 

@@ -327,6 +327,12 @@ public class DefaultCodegen implements CodegenConfig {
     private TemplatingEngineAdapter templatingEngine = new MustacheEngineAdapter();
     // flag to indicate whether to use the utils.OneOfImplementorAdditionalData related logic
     protected boolean useOneOfInterfaces = false;
+
+    // OAS 3.2: stream-only callback operations already warned about during this
+    // generation run, keyed by enclosing operation + callback identity — the tag
+    // loop and content-type splitting revisit the same callback several times.
+    // Cleared in processOpts so the next generation warns again.
+    private final Set<String> warnedStreamOnlyCallbackOperations = new HashSet<>();
     // whether the oneOf imports machinery should add oneOf interfaces as imports in implementing classes
     protected boolean addOneOfInterfaceImports = false;
     protected List<CodegenModel> addOneOfInterfaces = new ArrayList<>();
@@ -413,6 +419,8 @@ public class DefaultCodegen implements CodegenConfig {
 
     @Override
     public void processOpts() {
+        // a new generation run: stream-only callback warnings must be emitted again
+        warnedStreamOnlyCallbackOperations.clear();
 
         if (!additionalProperties.containsKey(CodegenConstants.MUSTACHE_PARENT_CONTEXT)) {
             // by default empty parent context
@@ -4843,15 +4851,9 @@ public class DefaultCodegen implements CodegenConfig {
      * @return the selected response code, or {@code null} if there is no success/default response
      */
     protected String findMethodResponseCode(ApiResponses responses) {
-        String code = null;
-        for (String responseCode : responses.keySet()) {
-            if (responseCode.startsWith("2") || responseCode.equals("default")) {
-                if (code == null || code.compareTo(responseCode) > 0) {
-                    code = responseCode;
-                }
-            }
-        }
-        return code;
+        // canonical implementation lives in ModelUtils so every consumer picks the
+        // same method response
+        return ModelUtils.methodResponseCode(responses);
     }
 
     /**
@@ -5122,8 +5124,9 @@ public class DefaultCodegen implements CodegenConfig {
         }
 
         if (operation.getCallbacks() != null && !operation.getCallbacks().isEmpty()) {
+            String parentOperation = httpMethod.toUpperCase(Locale.ROOT) + " " + path;
             operation.getCallbacks().forEach((name, callback) -> {
-                CodegenCallback c = fromCallback(name, callback, servers);
+                CodegenCallback c = fromCallback(name, callback, servers, parentOperation);
                 op.callbacks.add(c);
             });
         }
@@ -5537,6 +5540,22 @@ public class DefaultCodegen implements CodegenConfig {
      * @return Codegen Response object
      */
     public CodegenCallback fromCallback(String name, Callback callback, List<Server> servers) {
+        return fromCallback(name, callback, servers, null);
+    }
+
+    /**
+     * Builds the callback model like {@link #fromCallback(String, Callback, List)},
+     * additionally naming the enclosing operation so warnings about stream-only
+     * callback operations identify their owner and are emitted only once per
+     * generation run (the tag loop and content-type splitting revisit callbacks).
+     *
+     * @param name            the callback name
+     * @param callback        the callback object
+     * @param servers         server definitions
+     * @param parentOperation the enclosing operation as "METHOD path", or null
+     * @return the codegen callback model
+     */
+    public CodegenCallback fromCallback(String name, Callback callback, List<Server> servers, String parentOperation) {
         CodegenCallback c = new CodegenCallback();
         c.name = name;
 
@@ -5589,18 +5608,28 @@ public class DefaultCodegen implements CodegenConfig {
                         } else {
                             // OAS 3.2 sequential media types (itemSchema): a callback
                             // request body carried only by a stream cannot be serialized
-                            // yet — skipped unconditionally
+                            // yet — skipped unconditionally. The enclosing operation's
+                            // tag loop and its content-type split revisit this callback,
+                            // so the warning is emitted once per generation run, keyed
+                            // by the operation that owns it
+                            String callbackOwner = (parentOperation == null ? "" : parentOperation + " ")
+                                    + "callback '" + name + "'";
+                            String callbackOpKey = callbackOwner + " " + method + " " + expression;
                             List<String> streamOnlyBodyMediaTypes = ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, op);
                             if (!streamOnlyBodyMediaTypes.isEmpty()) {
-                                LOGGER.warn("Callback operation ({} on expression '{}') declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
-                                        method, expression, streamOnlyBodyMediaTypes);
+                                if (warnedStreamOnlyCallbackOperations.add(callbackOpKey)) {
+                                    LOGGER.warn("Callback operation ({} on expression '{}') of {} declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
+                                            method, expression, callbackOwner, streamOnlyBodyMediaTypes);
+                                }
                                 return;
                             }
                             if (!supportsStreamingResponses()) {
                                 List<String> streamOnlyMediaTypes = ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, op);
                                 if (!streamOnlyMediaTypes.isEmpty()) {
-                                    LOGGER.warn("Callback operation ({} on expression '{}') returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
-                                            method, expression, streamOnlyMediaTypes, getName());
+                                    if (warnedStreamOnlyCallbackOperations.add(callbackOpKey)) {
+                                        LOGGER.warn("Callback operation ({} on expression '{}') of {} returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
+                                                method, expression, callbackOwner, streamOnlyMediaTypes, getName());
+                                    }
                                     return;
                                 }
                             }

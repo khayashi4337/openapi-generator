@@ -30,6 +30,7 @@ import io.swagger.v3.oas.models.media.*;
 import io.swagger.v3.oas.models.parameters.Parameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
+import io.swagger.v3.oas.models.responses.ApiResponses;
 import io.swagger.v3.parser.ObjectMapperFactory;
 import io.swagger.v3.parser.core.models.AuthorizationValue;
 import io.swagger.v3.parser.util.ClasspathHelper;
@@ -1511,8 +1512,9 @@ public class ModelUtils {
      * is present (OAS 3.2), the schema comes from the first media type declaring a regular
      * {@code schema}: media types declaring only {@code itemSchema}, and media types
      * declaring nothing at all, must not shadow it. When no media type declares
-     * {@code schema} in that case, this method still returns {@code null} ({@code itemSchema}
-     * is not used for code generation yet) and logs a warning naming those media types.
+     * {@code schema} in that case, this method still returns {@code null} — {@code itemSchema}
+     * describes stream elements, never the response's regular schema — and logs a warning
+     * naming those media types.
      *
      * @param content a 'content' section in the OAS specification.
      * @return the Schema.
@@ -1545,9 +1547,12 @@ public class ModelUtils {
                     itemSchemaOnlyMediaTypes.add(entry.getKey());
                 }
             }
-            // once(): one response reaches this method several times per operation
+            // once(): one response reaches this method several times per operation.
+            // The text stays accurate for generators declaring streaming support:
+            // itemSchema never types the regular schema/return type — supported
+            // generators read it through the streaming operation markers instead.
             once(LOGGER).warn(MessageFormatter.format(
-                    "No media type in the OAS 'content' section declares a 'schema'; 'itemSchema' of media type(s) {} is not used for code generation yet, returning null",
+                    "No media type in the OAS 'content' section declares a 'schema'; 'itemSchema' of media type(s) {} is not used for the response's regular schema, returning null",
                     itemSchemaOnlyMediaTypes).getMessage());
             return null;
         }
@@ -1659,10 +1664,36 @@ public class ModelUtils {
     }
 
     /**
+     * The response code of the operation's "method response" — the response its
+     * return type is derived from: the lowest response code starting with "2"
+     * (lexicographic order, so {@code "2XX"} range keys participate too), or
+     * {@code "default"} when no 2xx exists. {@code null} when neither is present.
+     * {@code DefaultCodegen.findMethodResponseCode} delegates to this method so the
+     * selection exists in exactly one place.
+     *
+     * @param responses the operation's responses
+     * @return the method response's code, or null
+     */
+    public static String methodResponseCode(ApiResponses responses) {
+        if (responses == null) {
+            return null;
+        }
+        String code = null;
+        for (String responseCode : responses.keySet()) {
+            if (responseCode.startsWith("2") || responseCode.equals("default")) {
+                if (code == null || code.compareTo(responseCode) > 0) {
+                    code = responseCode;
+                }
+            }
+        }
+        return code;
+    }
+
+    /**
      * {@link #streamOnlyMediaTypes(Content)} applied to the operation's "method
      * response" — the response its return type is derived from (the lowest 2xx code,
      * or {@code "default"} when no 2xx exists), the same selection
-     * {@code DefaultCodegen.findMethodResponse} makes.
+     * {@link #methodResponseCode(ApiResponses)} makes.
      *
      * @param openAPI   current specification instance, used to resolve {@code $ref}s
      * @param operation the operation
@@ -1672,14 +1703,7 @@ public class ModelUtils {
         if (operation == null || operation.getResponses() == null || operation.getResponses().isEmpty()) {
             return Collections.emptyList();
         }
-        String code = null;
-        for (String responseCode : operation.getResponses().keySet()) {
-            if (responseCode.startsWith("2") || responseCode.equals("default")) {
-                if (code == null || code.compareTo(responseCode) > 0) {
-                    code = responseCode;
-                }
-            }
-        }
+        String code = methodResponseCode(operation.getResponses());
         if (code == null) {
             return Collections.emptyList();
         }

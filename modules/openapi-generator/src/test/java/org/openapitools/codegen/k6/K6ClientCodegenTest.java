@@ -3,6 +3,10 @@ package org.openapitools.codegen.k6;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.oas.models.media.Content;
+import io.swagger.v3.oas.models.media.MediaType;
+import io.swagger.v3.oas.models.media.ObjectSchema;
+import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
 import org.apache.commons.io.FileUtils;
@@ -64,6 +68,35 @@ public class K6ClientCodegenTest {
         try {
             TestUtils.assertFileContains(scriptJs, "http.get(");
             TestUtils.assertFileNotContains(scriptJs, "http.query(", "searchItems", "queryOnly");
+        } finally {
+            FileUtils.deleteDirectory(scriptJs.getParent().toFile());
+        }
+    }
+
+    @Test
+    public void testStreamOnlyOperationsAreSkipped() throws IOException {
+        // k6 scans paths itself (request-group construction and the dataextract
+        // pre-scan) — both must apply the same stream-only gate as the normal
+        // generator path or skipped operations would leak into the script
+        Content streamContent = new Content().addMediaType("application/jsonl",
+                new MediaType().itemSchema(new ObjectSchema()));
+        OpenAPI openAPI = TestUtils.createOpenAPI();
+        openAPI.getPaths().addPathItem("/normal",
+                new PathItem().get(new Operation().operationId("getNormal")
+                        .responses(new ApiResponses().addApiResponse("200", new ApiResponse().description("OK")))));
+        openAPI.getPaths().addPathItem("/stream",
+                new PathItem().get(new Operation().operationId("getStream")
+                        .responses(new ApiResponses().addApiResponse("200",
+                                new ApiResponse().description("stream").content(streamContent)))));
+        openAPI.getPaths().addPathItem("/upload",
+                new PathItem().post(new Operation().operationId("postUpload")
+                        .requestBody(new RequestBody().content(streamContent))
+                        .responses(new ApiResponses().addApiResponse("204", new ApiResponse().description("OK")))));
+
+        Path scriptJs = generate(openAPI);
+        try {
+            TestUtils.assertFileContains(scriptJs, "/normal");
+            TestUtils.assertFileNotContains(scriptJs, "/stream", "/upload");
         } finally {
             FileUtils.deleteDirectory(scriptJs.getParent().toFile());
         }

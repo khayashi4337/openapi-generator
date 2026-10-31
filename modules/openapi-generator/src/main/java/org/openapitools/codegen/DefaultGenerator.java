@@ -1589,12 +1589,28 @@ public class DefaultGenerator implements Generator {
             return;
         }
 
-        // OAS 3.2 sequential media types (itemSchema): a request body carried only by a
-        // stream cannot be serialized by any generator yet — skipped unconditionally
+        if (operation.getExtensions() != null && Boolean.TRUE.equals(operation.getExtensions().get(X_INTERNAL))) {
+            // skip operation if x-internal sets to true
+            LOGGER.info("Operation ({} {} - {}) not generated since x-internal is set to true",
+                    httpMethod, resourcePath, operation.getOperationId());
+            return;
+        }
+
+        // OAS 3.2 sequential media types (itemSchema). A content-type variant re-entering
+        // here was narrowed by the split below: its stream-only axis is dropped quietly
+        // because the un-split operation keeps at least one regular-schema variant —
+        // warning "the operation will be missing" would be false. An operation that is
+        // stream-only in full never reaches the split and still warns once.
+        boolean contentTypeVariant = operation.getExtensions() != null
+                && operation.getExtensions().containsKey(CodegenConstants.X_CONTENT_TYPE_VARIANT_GROUP);
+        // a request body carried only by a stream cannot be serialized by any
+        // generator yet — skipped unconditionally
         List<String> streamOnlyBodyMediaTypes = ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, operation);
         if (!streamOnlyBodyMediaTypes.isEmpty()) {
-            LOGGER.warn("{} {} declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
-                    httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyBodyMediaTypes);
+            if (!contentTypeVariant) {
+                LOGGER.warn("{} {} declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
+                        httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyBodyMediaTypes);
+            }
             return;
         }
         // a success response carried only by a stream degrades to a silent void when the
@@ -1602,8 +1618,10 @@ public class DefaultGenerator implements Generator {
         if (!config.supportsStreamingResponses()) {
             List<String> streamOnlyMediaTypes = ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, operation);
             if (!streamOnlyMediaTypes.isEmpty()) {
-                LOGGER.warn("{} {} returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
-                        httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyMediaTypes, config.getName());
+                if (!contentTypeVariant) {
+                    LOGGER.warn("{} {} returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
+                            httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyMediaTypes, config.getName());
+                }
                 return;
             }
         }
@@ -1679,11 +1697,7 @@ public class DefaultGenerator implements Generator {
         final List<SecurityRequirement> globalSecurities = openAPI.getSecurity();
         for (Tag tag : tags) {
             try {
-                if (operation.getExtensions() != null && Boolean.TRUE.equals(operation.getExtensions().get(X_INTERNAL))) {
-                    // skip operation if x-internal sets to true
-                    LOGGER.info("Operation ({} {} - {}) not generated since x-internal is set to true",
-                            httpMethod, resourcePath, operation.getOperationId());
-                } else {
+                {
                     CodegenOperation codegenOperation = config.fromOperation(resourcePath, httpMethod, operation, path.getServers());
                     if (wireHttpMethod != null) {
                         // OpenAPI 3.2 additionalOperations: the map key is the HTTP method

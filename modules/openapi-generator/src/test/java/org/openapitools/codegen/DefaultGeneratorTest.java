@@ -594,7 +594,7 @@ public class DefaultGeneratorTest {
                 .filter(e -> e.getLevel() == Level.WARN
                         && e.getFormattedMessage().contains("sequential media types"))
                 .collect(Collectors.toList());
-        Assert.assertEquals(warnings.size(), 5, "expected one warning per skipped operation");
+        Assert.assertEquals(warnings.size(), 7, "expected one warning per skipped operation");
         Assert.assertTrue(warnings.stream().anyMatch(e -> e.getFormattedMessage().contains("GET /events/stream")
                 && e.getFormattedMessage().contains("application/jsonl")));
         Assert.assertTrue(warnings.stream().anyMatch(e -> e.getFormattedMessage().contains("GET /events/ndjson")
@@ -624,7 +624,7 @@ public class DefaultGeneratorTest {
         Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
 
         Map<String, CodegenOperation> byId = result.values().stream().flatMap(List::stream)
-                .collect(Collectors.toMap(o -> o.operationId, o -> o));
+                .collect(Collectors.toMap(o -> o.operationId, o -> o, (a, b) -> a));
         Assert.assertTrue(byId.keySet().containsAll(Arrays.asList(
                 "streamEvents", "streamEventsNdjson", "streamEventsNormalized", "streamEventsInline")));
         // a stream-only request body is skipped even when the generator supports streaming
@@ -714,6 +714,189 @@ public class DefaultGeneratorTest {
         Assert.assertEquals(webhook.streamingFormat, "sse");
         Assert.assertNotNull(webhook.streamingItemType);
         Assert.assertEquals(webhook.streamingItemType.dataType, "Event");
+    }
+
+    @Test
+    public void testStreamOnlyOperationWithXInternalIsSkippedQuietly() throws Exception {
+        // x-internal filtering runs before the stream-only classification, so an
+        // internal stream-only operation produces only the usual informational
+        // "x-internal" message and never a stream warning
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        Logger generatorLogger = (Logger) LoggerFactory.getLogger(DefaultGenerator.class);
+        generatorLogger.addAppender(listAppender);
+
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        listAppender.stop();
+        generatorLogger.detachAppender(listAppender);
+
+        Set<String> operationIds = result.values().stream().flatMap(List::stream)
+                .map(o -> o.operationId).collect(Collectors.toSet());
+        Assert.assertFalse(operationIds.contains("internalStreamEvents"));
+        Assert.assertTrue(listAppender.list.stream()
+                .noneMatch(e -> e.getLevel() == Level.WARN
+                        && e.getFormattedMessage().contains("/events/internal-stream")),
+                "an internal operation must not produce a stream-only warning");
+    }
+
+    @Test
+    public void testStreamOnlyContentTypeVariantIsSkippedQuietly() throws Exception {
+        // listEvents mixes an SSE itemSchema with a JSON schema, so it is split
+        // into per-content-type variants; the stream-only variant re-enters
+        // processOperation and must be skipped quietly — the operation as a
+        // whole is NOT missing, its JSON variant is still generated
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        Logger generatorLogger = (Logger) LoggerFactory.getLogger(DefaultGenerator.class);
+        generatorLogger.addAppender(listAppender);
+
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+        codegen.setSplitOperationsByContentType(true);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        listAppender.stop();
+        generatorLogger.detachAppender(listAppender);
+
+        Set<String> operationIds = result.values().stream().flatMap(List::stream)
+                .map(o -> o.operationId).collect(Collectors.toSet());
+        Assert.assertTrue(operationIds.stream().anyMatch(id -> id.startsWith("listEvents")),
+                "the JSON variant of a mixed operation is still generated");
+        Assert.assertTrue(listAppender.list.stream()
+                .noneMatch(e -> e.getLevel() == Level.WARN
+                        && e.getFormattedMessage().contains("sequential media types")
+                        && e.getFormattedMessage().contains("GET /events ")),
+                "a stream-only content-type variant must not warn: the operation is not missing");
+    }
+
+    @Test
+    public void testStreamOnlyAdditionalOperationFollowsSameGate() throws Exception {
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+
+        // additionalOperations-capable but not streaming-capable: the `query`
+        // operation reaches processOperation and is warned + skipped there
+        DefaultCodegen codegen = new DefaultCodegen() {
+            @Override
+            public boolean supportsAdditionalOperations() {
+                return true;
+            }
+        };
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+        Assert.assertTrue(result.values().stream().flatMap(List::stream)
+                .noneMatch(o -> "queryEventsAudit".equals(o.operationId)),
+                "stream-only additional operation skipped without streaming support");
+
+        // streaming-capable too: the operation is kept and marked
+        DefaultCodegen streaming = new DefaultCodegen() {
+            @Override
+            public boolean supportsAdditionalOperations() {
+                return true;
+            }
+
+            @Override
+            public boolean supportsStreamingResponses() {
+                return true;
+            }
+        };
+        streaming.setOpenAPI(openAPI);
+        opts.config(streaming);
+        generator.opts(opts);
+        result = generator.processPaths(openAPI.getPaths());
+        CodegenOperation audit = result.values().stream().flatMap(List::stream)
+                .filter(o -> "queryEventsAudit".equals(o.operationId)).findFirst().orElse(null);
+        Assert.assertNotNull(audit);
+        Assert.assertTrue(audit.isStreamingResponse);
+        Assert.assertEquals(audit.streamingFormat, "jsonl");
+    }
+
+    @Test
+    public void testStreamOnlyCustomMediaTypeMarkedAsOtherFormat() throws Exception {
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen() {
+            @Override
+            public boolean supportsStreamingResponses() {
+                return true;
+            }
+        };
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        CodegenOperation custom = result.values().stream().flatMap(List::stream)
+                .filter(o -> "streamEventsCustom".equals(o.operationId)).findFirst().orElse(null);
+        Assert.assertNotNull(custom);
+        Assert.assertTrue(custom.isStreamingResponse);
+        Assert.assertEquals(custom.streamingMediaType, "application/vnd.custom-seq");
+        Assert.assertEquals(custom.streamingFormat, "other");
+    }
+
+    @Test
+    public void testStreamOnlyCallbackWarnedOnceDespiteMultipleTags() throws Exception {
+        // /events/subscribe2 declares two tags, so processPaths invokes
+        // fromOperation twice for the same operation and its stream-only
+        // callback is revisited — the warning must still fire exactly once and
+        // name the owning operation
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        Logger codegenLogger = (Logger) LoggerFactory.getLogger(DefaultCodegen.class);
+        codegenLogger.addAppender(listAppender);
+
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        listAppender.stop();
+        codegenLogger.detachAppender(listAppender);
+
+        // the operation survives under both tags while its callback is dropped once
+        Assert.assertEquals(result.values().stream().flatMap(List::stream)
+                .filter(o -> "subscribe2Events".equals(o.operationId)).count(), 2);
+
+        List<ILoggingEvent> callbackWarnings = listAppender.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN
+                        && e.getFormattedMessage().contains("sequential media types")
+                        && e.getFormattedMessage().contains("/events/subscribe2"))
+                .collect(Collectors.toList());
+        Assert.assertEquals(callbackWarnings.size(), 1,
+                "a stream-only callback must be warned about exactly once per generation");
+        Assert.assertTrue(callbackWarnings.get(0).getFormattedMessage().contains("POST /events/subscribe2"),
+                "the warning names the enclosing operation");
+        Assert.assertTrue(callbackWarnings.get(0).getFormattedMessage().contains("onData"),
+                "the warning names the callback");
     }
 
     @Test
