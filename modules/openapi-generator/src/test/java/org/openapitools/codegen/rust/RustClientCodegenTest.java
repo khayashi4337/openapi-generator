@@ -17,6 +17,10 @@
 
 package org.openapitools.codegen.rust;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.filter.Filter;
+import ch.qos.logback.core.read.ListAppender;
+import ch.qos.logback.core.spi.FilterReply;
 import io.swagger.v3.oas.models.media.IntegerSchema;
 import org.apache.commons.io.FileUtils;
 import org.openapitools.codegen.CodegenConstants;
@@ -24,6 +28,7 @@ import org.openapitools.codegen.DefaultGenerator;
 import org.openapitools.codegen.TestUtils;
 import org.openapitools.codegen.config.CodegenConfigurator;
 import org.openapitools.codegen.languages.RustClientCodegen;
+import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -309,6 +314,49 @@ public class RustClientCodegenTest {
     }
 
     @Test
+    public void testDiscriminatedUnionKeepsChildFields() throws IOException {
+        Path target = Files.createTempDirectory("test");
+        target.toFile().deleteOnExit();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName("rust")
+                .setInputSpec("src/test/resources/3_0/rust/discriminated-union.yaml")
+                .setSkipOverwrite(false)
+                .setOutputDir(target.toAbsolutePath().toString().replace("\\", "/"));
+        new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        // newtype variants, so the child's own fields survive
+        Path unionPath = Path.of(target.toString(), "/src/models/api_error.rs");
+        TestUtils.assertFileContains(unionPath, "#[serde(tag = \"type\")]");
+        TestUtils.assertFileContains(unionPath, "ObjectExists(Box<models::ObjectExists>),");
+        TestUtils.assertFileContains(unionPath, "ValidationError(Box<models::ValidationError>),");
+        TestUtils.assertFileContains(unionPath, "Self::ObjectExists(Default::default())");
+        TestUtils.assertFileNotContains(unionPath, "ObjectExists {");
+
+        // the consumed tag key defaults and is skipped while unset; standalone field and new() unchanged
+        Path childPath = Path.of(target.toString(), "/src/models/object_exists.rs");
+        TestUtils.assertFileContains(childPath,
+                "#[serde(rename = \"type\", default, skip_serializing_if = \"String::is_empty\")]",
+                "pub identifier: String,",
+                "pub fn new(r#type: String, message: String, identifier: String) -> ObjectExists {");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/alpha.rs"),
+                "#[serde(rename = \"kind\", default, skip_serializing_if = \"Option::is_none\")]");
+        // an enum-typed tag would be written twice, the child's copy keeping its default: inline variants, children untouched
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/pet.rs"),
+                "#[serde(rename=\"Cat\")]\n    Cat {", "#[serde(rename=\"Dog\")]\n    Dog {");
+        TestUtils.assertFileNotContains(Path.of(target.toString(), "/src/models/pet.rs"), "Box<models::Cat>");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/cat.rs"), "#[serde(rename = \"petType\")]\n    pub pet_type: PetType,");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/shape.rs"), "#[serde(rename=\"circle\")]\n    Circle {");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/circle.rs"), "#[serde(rename = \"kind\")]\n    pub kind: models::ShapeKind,");
+
+        // a mapping that names the base itself leaves no struct to wrap (E0275): inline variants, children untouched
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/creature.rs"),
+                "#[serde(rename=\"Creature\")]\n    Creature {", "#[serde(rename=\"Bird\")]\n    Bird {");
+        TestUtils.assertFileNotContains(Path.of(target.toString(), "/src/models/creature.rs"), "Box<models::Creature>");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/creature.rs"), "#[serde(tag = \"kind\")]");
+        TestUtils.assertFileContains(Path.of(target.toString(), "/src/models/bird.rs"), "#[serde(rename = \"kind\")]\n    pub kind: String,");
+    }
+
+    @Test
     public void testIntegerPropertyEnum() throws IOException {
         Path target = Files.createTempDirectory("test");
         try {
@@ -522,6 +570,19 @@ public class RustClientCodegenTest {
     @Test
     public void testReqwestSkipsInvalidMethodNames() throws IOException {
         Path target = Files.createTempDirectory("test");
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(RustClientCodegen.class);
+        final String testThreadName = Thread.currentThread().getName();
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.addFilter(new Filter<ILoggingEvent>() {
+            @Override
+            public FilterReply decide(ILoggingEvent event) {
+                return testThreadName.equals(event.getThreadName())
+                        ? FilterReply.NEUTRAL : FilterReply.DENY;
+            }
+        });
+        listAppender.start();
+        logger.addAppender(listAppender);
         try {
             final CodegenConfigurator configurator = new CodegenConfigurator()
                     .setGeneratorName("rust")
@@ -536,7 +597,15 @@ public class RustClientCodegenTest {
             Assert.assertTrue(generated.contains("fn list_pets"), "GET operation should be kept");
             Assert.assertFalse(generated.contains("bad_method"),
                     "operation with an invalid RFC 9110 method name must be skipped");
+            boolean warned = listAppender.list.stream()
+                    .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .anyMatch(msg -> msg.contains("MY METHOD")
+                            && msg.contains("not a valid RFC 9110 token"));
+            Assert.assertTrue(warned,
+                    "expected a WARN mentioning 'MY METHOD' and 'not a valid RFC 9110 token'");
         } finally {
+            logger.detachAppender(listAppender);
             FileUtils.deleteDirectory(target.toFile());
         }
     }
@@ -606,6 +675,9 @@ public class RustClientCodegenTest {
      */
     @Test
     public void testReqwestGeneratedClientSendsVerbatimMethods() throws IOException, InterruptedException {
+        if (!Boolean.getBoolean("rust.e2e")) {
+            throw new org.testng.SkipException("rust.e2e system property is not enabled; skipping generated-client verification");
+        }
         if (!isCommandAvailable("cargo")) {
             throw new org.testng.SkipException("cargo is not on PATH; skipping generated-client verification");
         }

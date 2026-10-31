@@ -38,6 +38,7 @@ import org.openapitools.codegen.model.ModelMap;
 import org.openapitools.codegen.model.ModelsMap;
 import org.openapitools.codegen.model.OperationMap;
 import org.openapitools.codegen.model.OperationsMap;
+import org.openapitools.codegen.model.WebhooksMap;
 import org.openapitools.codegen.templating.mustache.CaseFormatLambda;
 import org.openapitools.codegen.utils.EnumUtils;
 import org.openapitools.codegen.utils.ProcessUtils;
@@ -296,7 +297,7 @@ public class JavaClientCodegen extends AbstractJavaCodegen
         cliOptions.add(CliOption.newBoolean(GENERATE_INSECURE_TLS_HOOK, "Generate the ApiClient.disableCertificateValidation hook, which trusts all TLS certificates (default to true). Set to false to omit it, e.g. when static analysis flags the trust-all TrustManager it contains. Available on `jersey2`, `jersey3` libraries.", true));
         cliOptions.add(CliOption.newBoolean(USE_ENUM_CASE_INSENSITIVE, "Use `equalsIgnoreCase` when String for enum comparison", useEnumCaseInsensitive));
         cliOptions.add(CliOption.newBoolean(FAIL_ON_UNKNOWN_PROPERTIES, "Fail Jackson de-serialization on unknown properties", this.failOnUnknownProperties));
-        cliOptions.add(CliOption.newBoolean(USE_JACKSON_3, "Use Jackson 3 instead of Jackson 2. Supported for 'native', 'apache-httpclient', and 'jersey3' libraries (requires Java 17+) and for Spring 'resttemplate', 'webclient', and 'restclient' libraries (require useSpringBoot4=true).", this.useJackson3));
+        cliOptions.add(CliOption.newBoolean(USE_JACKSON_3, "Use Jackson 3 instead of Jackson 2. Supported for 'native', 'apache-httpclient', 'jersey3', and 'rest-assured' libraries (requires Java 17+) and for Spring 'resttemplate', 'webclient', and 'restclient' libraries (require useSpringBoot4=true).", this.useJackson3));
         cliOptions.add(CliOption.newBoolean(SUPPORT_VERTX_FUTURE, "Also generate api methods that return a vertx Future instead of taking a callback. Only `vertx` supports this option. Requires vertx 4 or greater.", this.supportVertxFuture));
         cliOptions.add(CliOption.newBoolean(USE_SEALED_ONE_OF_INTERFACES, "Generate the oneOf interfaces as sealed interfaces. Only supported for WebClient, RestClient and Microprofile (with Jackson).", this.useSealedOneOfInterfaces));
         cliOptions.add(CliOption.newBoolean(USE_UNARY_INTERCEPTOR, "If true it will generate ResponseInterceptors using a UnaryOperator. This can be usefull for manipulating the request before it gets passed, for example doing your own decryption", this.useUnaryInterceptor));
@@ -316,7 +317,7 @@ public class JavaClientCodegen extends AbstractJavaCodegen
         supportedLibraries.put(RESTEASY, "HTTP client: Resteasy client 4.7.6. JSON processing: Jackson 2.18.9");
         supportedLibraries.put(VERTX, "HTTP client: VertX client 3.5.2. JSON processing: Jackson 2.18.9");
         supportedLibraries.put(GOOGLE_API_CLIENT, "HTTP client: Google API client 2.2.0. JSON processing: Jackson 2.18.9");
-        supportedLibraries.put(REST_ASSURED, "HTTP client: rest-assured 5.3.2. JSON processing: Gson 2.10.1 or Jackson 2.18.9. Only for Java 8");
+        supportedLibraries.put(REST_ASSURED, "HTTP client: rest-assured 5.3.2 (6.x if `useJackson3=true`). JSON processing: Gson 2.10.1 or Jackson 2.18.9 (3.x if `useJackson3=true`, requires Java 17+). Only for Java 8 (Java 17+ if `useJackson3=true`)");
         supportedLibraries.put(NATIVE, "HTTP client: Java native HttpClient. JSON processing: Jackson 2.18.9 (3.x if `useJackson3=true`). Only for Java11+");
         supportedLibraries.put(MICROPROFILE, "HTTP client: Microprofile client " + MICROPROFILE_REST_CLIENT_DEFAULT_VERSION + " (default, set desired version via `" + MICROPROFILE_REST_CLIENT_VERSION + "=x.x.x`). JSON processing: JSON-B 1.0.2 or Jackson 2.18.9");
         supportedLibraries.put(APACHE, "HTTP client: Apache httpclient 5.2.1. JSON processing: Jackson 2.18.9 (3.x if `useJackson3=true`)");
@@ -423,8 +424,8 @@ public class JavaClientCodegen extends AbstractJavaCodegen
         convertPropertyToBooleanAndWriteBack(USE_SPRING_BOOT4, this::setUseSpringBoot4);
         if (useJackson3 && (libRestClient || libRestTemplate || libWebClient) && !useSpringBoot4) {
             throw new IllegalArgumentException("useJackson3 for the restclient, resttemplate, and webclient libraries requires useSpringBoot4=true");
-        } else if (useJackson3 && !libNative && !libApache && !libJersey3 && !libRestClient && !libRestTemplate && !libWebClient) {
-            throw new IllegalArgumentException("useJackson3 is only supported for the 'native', 'apache-httpclient', 'jersey3', 'restclient', 'resttemplate', and 'webclient' libraries. " +
+        } else if (useJackson3 && !libNative && !libApache && !libJersey3 && !libRestAssured && !libRestClient && !libRestTemplate && !libWebClient) {
+            throw new IllegalArgumentException("useJackson3 is only supported for the 'native', 'apache-httpclient', 'jersey3', 'rest-assured', 'restclient', 'resttemplate', and 'webclient' libraries. " +
                     "The Spring libraries also require useSpringBoot4=true.");
         }
 
@@ -460,6 +461,10 @@ public class JavaClientCodegen extends AbstractJavaCodegen
         writePropertyBack(STATIC_REQUEST, getStaticRequest());
 
         if (libWebClient && (useSealedOneOfInterfaces || useJakartaEe)) {
+            writePropertyBack(JAVA_17, true);
+        }
+
+        if (libRestTemplate && useJakartaEe) {
             writePropertyBack(JAVA_17, true);
         }
 
@@ -945,6 +950,16 @@ public class JavaClientCodegen extends AbstractJavaCodegen
     public OperationsMap postProcessOperationsWithModels(OperationsMap objs, List<ModelMap> allModels) {
         super.postProcessOperationsWithModels(objs, allModels);
 
+        // okhttp-gson emits the HTTP method verbatim as a Java string literal,
+        // so additionalOperations keys that are not RFC 9110 tokens would
+        // produce uncompilable code
+        if (supportsAdditionalOperations()) {
+            OperationMap operations = objs.getOperations();
+            if (operations != null && operations.getOperation() != null) {
+                skipNonTokenHttpMethods(operations.getOperation());
+            }
+        }
+
         if (this.getSingleRequestParameter() && (isLibrary(JERSEY2) || isLibrary(JERSEY3) || isLibrary(OKHTTP_GSON) || isLibrary(NATIVE))) {
             // loop through operations to set x-group-parameters extension to true if useSingleRequestParameter option is enabled
             OperationMap operations = objs.getOperations();
@@ -1143,6 +1158,19 @@ public class JavaClientCodegen extends AbstractJavaCodegen
     public void postProcessModelProperty(CodegenModel model, CodegenProperty property) {
         super.postProcessModelProperty(model, property);
 
+        if (OKHTTP_GSON.equals(getLibrary())
+                && property.getComposedSchemas() != null
+                && property.getComposedSchemas().getNot() != null) {
+            CodegenProperty notProperty = property.getComposedSchemas().getNot();
+            if (((notProperty.isEnum && notProperty.isString) || notProperty.isEnumRef)
+                    && notProperty.allowableValues != null
+                    && notProperty.allowableValues.get("values") != null) {
+                property.vendorExtensions.put(
+                        "x-java-not-string-enum-values",
+                        notProperty.allowableValues.get("values"));
+            }
+        }
+
         if (!model.isEnum) {
             //Needed imports for Jackson based libraries
             if (additionalProperties.containsKey(SERIALIZATION_LIBRARY_JACKSON)) {
@@ -1222,6 +1250,30 @@ public class JavaClientCodegen extends AbstractJavaCodegen
     }
 
     @Override
+    public Map<String, ModelsMap> postProcessAllModels(Map<String, ModelsMap> objs) {
+        objs = super.postProcessAllModels(objs);
+        if (isLibrary(OKHTTP_GSON)) {
+            // gson refuses a class whose hierarchy declares two fields bound to one JSON name, so
+            // the okhttp-gson additionalProperties bag is declared once, on the topmost ancestor
+            // that has one; every descendant inherits it instead of declaring its own copy.
+            // A oneOf/anyOf wrapper extends AbstractOpenApiSchema, not its own parent, and has no
+            // bag, so nothing is inherited through it
+            for (CodegenModel cm : getAllModels(objs).values()) {
+                for (CodegenModel ancestor = cm.getParentModel(); ancestor != null; ancestor = ancestor.getParentModel()) {
+                    if (!ancestor.oneOf.isEmpty() || !ancestor.anyOf.isEmpty()) {
+                        break;
+                    }
+                    if (ancestor.isAdditionalPropertiesTrue) {
+                        cm.vendorExtensions.put("x-inherits-additional-properties", true);
+                        break;
+                    }
+                }
+            }
+        }
+        return objs;
+    }
+
+    @Override
     public ModelsMap postProcessModelsEnum(ModelsMap objs) {
         objs = super.postProcessModelsEnum(objs);
         //Needed import for Gson based libraries
@@ -1255,28 +1307,9 @@ public class JavaClientCodegen extends AbstractJavaCodegen
 
                 for (CodegenProperty var : cm.vars) {
                     addNullableImports = isAddNullableImports(cm, addNullableImports, var);
-                    if (Boolean.TRUE.equals(var.getVendorExtensions().get("x-enum-as-string"))) {
-                        // treat enum string as just string
-                        var.datatypeWithEnum = var.dataType;
 
-                        if (StringUtils.isNotEmpty(var.defaultValue)) { // has default value
-                            String defaultValue = var.defaultValue.substring(var.defaultValue.lastIndexOf('.') + 1);
-                            for (EnumVarMap enumVars : EnumUtils.getEnumVars(var.allowableValues)) {
-                                if (defaultValue.equals(enumVars.getEnumName())) {
-                                    // update default to use the string directly instead of enum string
-                                    var.defaultValue = (String) enumVars.getEnumValue();
-                                }
-                            }
-                        }
-
-                        // add import for Set, HashSet
-                        cm.imports.add("Set");
-                        Map<String, String> importsSet = new HashMap<>();
-                        importsSet.put("import", "java.util.Set");
-                        imports.add(importsSet);
-                        Map<String, String> importsHashSet = new HashMap<>();
-                        importsHashSet.put("import", "java.util.HashSet");
-                        imports.add(importsHashSet);
+                    if (Boolean.TRUE.equals(var.getVendorExtensions().get(X_ENUM_AS_STRING))) {
+                        handleEnumAsString(var, cm, imports);
                     }
 
                 }
@@ -1440,6 +1473,37 @@ public class JavaClientCodegen extends AbstractJavaCodegen
         //  nullable_var_annotations.mustache generates nullable annotations as @{{javaxPackage}}.annotation.Nullable
         // override the default pattern for the "find and replace"
         jSpecifyNullableLambda.setNullableAnnotation(nullableAnnotation);
+    }
+
+    @Override
+    public WebhooksMap postProcessWebhooksWithModels(WebhooksMap objs, List<ModelMap> allModels) {
+        // webhooks render through api.mustache as well, so their
+        // additionalOperations keys need the same RFC 9110 token check
+        WebhooksMap result = super.postProcessWebhooksWithModels(objs, allModels);
+        if (supportsAdditionalOperations()
+                && result.getWebhooks() != null && result.getWebhooks().getOperation() != null) {
+            skipNonTokenHttpMethods(result.getWebhooks().getOperation());
+        }
+        return result;
+    }
+
+    private static final Set<String> STANDARD_HTTP_METHODS = new HashSet<>(Arrays.asList(
+            "GET", "PUT", "POST", "DELETE", "HEAD", "OPTIONS", "TRACE", "PATCH", "CONNECT"));
+
+    // RFC 9110 tchar — additionalOperations keys must match this to be
+    // emitted as a Java string literal
+    private static final Pattern HTTP_TOKEN = Pattern.compile("[!#$%&'*+\\-.^_`|~0-9A-Za-z]+");
+
+    private void skipNonTokenHttpMethods(List<CodegenOperation> operations) {
+        for (Iterator<CodegenOperation> it = operations.iterator(); it.hasNext(); ) {
+            CodegenOperation op = it.next();
+            if (op.httpMethod != null && !STANDARD_HTTP_METHODS.contains(op.httpMethod)
+                    && !HTTP_TOKEN.matcher(op.httpMethod).matches()) {
+                LOGGER.warn("HTTP method '{}' is not a valid RFC 9110 token; skipping operation {}",
+                            op.httpMethod, op.operationId);
+                it.remove();
+            }
+        }
     }
 
     @Override

@@ -17,6 +17,10 @@
 
 package org.openapitools.codegen.java;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.filter.Filter;
+import ch.qos.logback.core.read.ListAppender;
+import ch.qos.logback.core.spi.FilterReply;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.body.FieldDeclaration;
@@ -43,9 +47,12 @@ import org.openapitools.codegen.languages.JavaClientCodegen;
 import org.openapitools.codegen.languages.features.BeanValidationFeatures;
 import org.openapitools.codegen.languages.features.CXFServerFeatures;
 import org.openapitools.codegen.meta.features.SecurityFeature;
+import org.openapitools.codegen.model.ModelMap;
+import org.openapitools.codegen.model.ModelsMap;
 import org.openapitools.codegen.model.OperationMap;
 import org.openapitools.codegen.model.OperationsMap;
 import org.openapitools.codegen.testutils.ConfigAssert;
+import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.DataProvider;
 import org.testng.annotations.Test;
@@ -589,6 +596,60 @@ public class JavaClientCodegenTest {
     }
 
     @Test
+    public void testJsonContentHeaderUsesJsonSerialization() {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                .setLibrary(JavaClientCodegen.OKHTTP_GSON)
+                .setInputSpec("src/test/resources/3_1/java/json-header-content.yaml")
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        validateJavaSourceFiles(files);
+
+        assertThat(output.resolve("src/main/java/org/openapitools/client/ApiClient.java"))
+                .content()
+                .contains("public String parameterToJsonString(Object param)");
+
+        assertThat(output.resolve("src/main/java/org/openapitools/client/api/DefaultApi.java"))
+                .content()
+                .contains(
+                        "localVarHeaderParams.put(\"X-Json-Arg\", localVarApiClient.parameterToJsonString(xJsonArg));"
+                )
+                .doesNotContain(
+                        "localVarHeaderParams.put(\"X-Json-Arg\", localVarApiClient.parameterToString(xJsonArg));"
+                );
+    }
+
+    @Test
+    public void testDynamicJsonContentHeaderUsesJsonSerialization() {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                .setLibrary(JavaClientCodegen.OKHTTP_GSON)
+                .setInputSpec("src/test/resources/3_1/java/json-header-content.yaml")
+                .addAdditionalProperty("dynamicOperations", true)
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        validateJavaSourceFiles(files);
+
+        assertThat(output.resolve("src/main/java/org/openapitools/client/ApiClient.java"))
+                .content()
+                .contains("if (param.getContent() != null && param.getContent().containsKey(\"application/json\")) {")
+                .contains("public String parameterToJsonString(Object param) {\n        if (param == null) {\n            return \"\";\n        }")
+                .contains("headerParams.put(param.getName(), parameterToJsonString(value));")
+                .contains("headerParams.put(param.getName(), parameterToString(value));");
+
+        assertThat(output.resolve("src/main/java/org/openapitools/client/api/DefaultApi.java"))
+                .content()
+                .contains("paramMap.put(\"X-Json-Arg\", xJsonArg);")
+                .contains("paramMap.put(\"X-Plain-Arg\", xPlainArg);");
+    }
+
+    @Test
     public void testGeneratePingSomeObj() {
         final Path output = newTempFolder();
         final CodegenConfigurator configurator = new CodegenConfigurator()
@@ -898,6 +959,38 @@ public class JavaClientCodegenTest {
                 .contains("jackson-databind-nullable");
     }
 
+    @Test
+    public void testRestAssuredWithJackson3() {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                .setLibrary(JavaClientCodegen.REST_ASSURED)
+                .addAdditionalProperty(CodegenConstants.API_PACKAGE, "xyz.abcdef.api")
+                .addAdditionalProperty(CodegenConstants.INVOKER_PACKAGE, "xyz.abcdef.invoker")
+                .addAdditionalProperty(CodegenConstants.SERIALIZATION_LIBRARY, "jackson")
+                .addAdditionalProperty(JavaClientCodegen.USE_JACKSON_3, true)
+                .addAdditionalProperty(JavaClientCodegen.OPENAPI_NULLABLE, true)
+                .setInputSpec("src/test/resources/3_0/ping.yaml")
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        validateJavaSourceFiles(files);
+        assertThat(output.resolve("src/main/java/xyz/abcdef/invoker/JacksonObjectMapper.java")).content()
+                .contains("extends Jackson3Mapper")
+                .contains("import io.restassured.path.json.mapper.factory.Jackson3ObjectMapperFactory;")
+                .contains("import tools.jackson.databind.json.JsonMapper;")
+                .contains("new JsonNullableJackson3Module()")
+                .doesNotContain("com.fasterxml.jackson.databind")
+                .doesNotContain("Jackson2");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/invoker/RFC3339JavaTimeModule.java")).doesNotExist();
+        assertThat(output.resolve("pom.xml")).content()
+                .contains("<groupId>tools.jackson</groupId>")
+                .contains("<rest-assured.version>6.0.1</rest-assured.version>")
+                .contains("<groupId>com.fasterxml.jackson.core</groupId>")
+                .doesNotContain("jackson-datatype-jsr310");
+    }
+
     @Test(dataProvider = "springBoot4Jackson3Libraries")
     void supportsJackson3WithOpenApiNullableForSpringBoot4Libraries(String library) {
         String outputDir = newTempFolder().toString();
@@ -916,6 +1009,45 @@ public class JavaClientCodegenTest {
         assertThat(new File(outputDir, "src/main/java/org/openapitools/client/ApiClient.java"))
                 .content()
                 .contains("JsonNullableJackson3Module");
+    }
+
+    @Test
+    public void testOkHttpGsonValidatesStringEnumExcludedByNot() {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                .setLibrary(JavaClientCodegen.OKHTTP_GSON)
+                .setInputSpec("src/test/resources/3_1/java/oneof-not-enum.yaml")
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        validateJavaSourceFiles(files);
+
+        assertThat(output.resolve("src/main/java/org/openapitools/client/model/Other.java"))
+                .content()
+                .contains(
+                        "if (jsonObj.get(\"kind\") != null",
+                        "jsonObj.get(\"kind\").isJsonPrimitive()",
+                        "jsonObj.get(\"kind\").getAsJsonPrimitive().isString()",
+                        "\"known\".equals(jsonObj.get(\"kind\").getAsString())",
+                        "matches a value disallowed by `not`"
+                )
+                .doesNotContain(
+                        "jsonObj.get(\"not_schema\")"
+                );
+        assertThat(output.resolve("src/main/java/org/openapitools/client/model/OtherWithEnumRef.java"))
+                .content()
+                .contains(
+                        "if (jsonObj.get(\"kind\") != null",
+                        "jsonObj.get(\"kind\").isJsonPrimitive()",
+                        "jsonObj.get(\"kind\").getAsJsonPrimitive().isString()",
+                        "\"known\".equals(jsonObj.get(\"kind\").getAsString())",
+                        "matches a value disallowed by `not`"
+                )
+                .doesNotContain(
+                        "jsonObj.get(\"not_schema\")"
+                );
     }
 
     @Test
@@ -2100,6 +2232,86 @@ public class JavaClientCodegenTest {
                 .content().contains("public class SchemaWithTwoAllOfRefs {");
         assertThat(output.resolve("src/main/java/xyz/abcdef/model/AnotherChild.java"))
                 .content().contains("public class AnotherChild {");
+    }
+
+    @Test
+    public void testAdditionalPropertiesFieldIsDeclaredOncePerHierarchyForGson() {
+        final Path output = generateOkHttpGsonWithAdditionalProperties("src/test/resources/3_0/allOf_extension_parent.yaml");
+
+        // exactly one class per hierarchy declares the bag; descendants inherit it
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Person.java"))
+                .content().contains("private Map<String, Object> additionalProperties;");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Child.java"))
+                .content()
+                .contains("public class Child extends Person {")
+                .contains("public Child putAdditionalProperty(String key, Object value) {")
+                .doesNotContain("Map<String, Object> additionalProperties;");
+        // a model without an allOf parent declares its own bag, as before
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/PersonA.java"))
+                .content().contains("private Map<String, Object> additionalProperties;");
+    }
+
+    @Test
+    public void testAdditionalPropertiesFieldIsDeclaredOnceAcrossMultiLevelAllOfForGson() {
+        final Path output = generateOkHttpGsonWithAdditionalProperties("src/test/resources/3_0/java/okhttp-gson-additional-properties-allof-chain.yaml");
+
+        // exactly one class per hierarchy declares the bag, also across Root <- Middle <- Leaf
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Root.java"))
+                .content().contains("private Map<String, Object> additionalProperties;");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Middle.java"))
+                .content()
+                .contains("public class Middle extends Root {")
+                .contains("public Middle putAdditionalProperty(String key, Object value) {")
+                .doesNotContain("Map<String, Object> additionalProperties;");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Leaf.java"))
+                .content()
+                .contains("public class Leaf extends Middle {")
+                .contains("public Leaf putAdditionalProperty(String key, Object value) {")
+                .doesNotContain("Map<String, Object> additionalProperties;");
+    }
+
+    @Test
+    public void testAdditionalPropertiesFieldIsDeclaredBelowOneOfAndAnyOfParentsForGson() {
+        final Path output = generateOkHttpGsonWithAdditionalProperties("src/test/resources/3_0/java/okhttp-gson-additional-properties-composed-parent.yaml");
+
+        // a oneOf/anyOf wrapper has no bag to inherit, so its allOf children declare their own
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/Pet.java"))
+                .content()
+                .contains("public class Pet extends AbstractOpenApiSchema")
+                .doesNotContain("Map<String, Object> additionalProperties;");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/ExtendedPet.java"))
+                .content()
+                .contains("public class ExtendedPet extends Pet {")
+                .contains("private Map<String, Object> additionalProperties;");
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/ExtendedShape.java"))
+                .content()
+                .contains("public class ExtendedShape extends Shape {")
+                .contains("private Map<String, Object> additionalProperties;");
+        // below the first class that declares it, the bag is inherited as usual
+        assertThat(output.resolve("src/main/java/xyz/abcdef/model/ExtendedPetLeaf.java"))
+                .content()
+                .contains("public class ExtendedPetLeaf extends ExtendedPet {")
+                .contains("public ExtendedPetLeaf putAdditionalProperty(String key, Object value) {")
+                .doesNotContain("Map<String, Object> additionalProperties;");
+    }
+
+    private Path generateOkHttpGsonWithAdditionalProperties(String inputSpec) {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                // use default `okhttp-gson`
+                .addAdditionalProperty(CodegenConstants.API_PACKAGE, "xyz.abcdef.api")
+                .addAdditionalProperty(CodegenConstants.MODEL_PACKAGE, "xyz.abcdef.model")
+                .addAdditionalProperty(CodegenConstants.INVOKER_PACKAGE, "xyz.abcdef.invoker")
+                .addAdditionalProperty("disallowAdditionalPropertiesIfNotPresent", "false")
+                .setInputSpec(inputSpec)
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.setGeneratorPropertyDefault(CodegenConstants.MODELS, "true");
+        List<File> files = generator.opts(configurator.toClientOptInput()).generate();
+        validateJavaSourceFiles(files);
+        return output;
     }
 
     @Test
@@ -4231,6 +4443,66 @@ public class JavaClientCodegenTest {
         );
     }
 
+    /**
+     * oneOf/anyOf members that are arrays or maps must not generate invalid Java such as
+     * {@code getList<String>()} or {@code List<String>.class}.
+     * See https://github.com/OpenAPITools/openapi-generator/issues/22304 and
+     * https://github.com/OpenAPITools/openapi-generator/issues/22249
+     */
+    @Test
+    public void testNativeOneOfAnyOfWithContainerMembers() {
+        final Path output = newTempFolder();
+        final CodegenConfigurator configurator = new CodegenConfigurator()
+                .setGeneratorName(JAVA_GENERATOR)
+                .setLibrary(JavaClientCodegen.NATIVE)
+                .setInputSpec("src/test/resources/3_0/java/native/issue22304.yaml")
+                .setOutputDir(output.toString().replace("\\", "/"));
+
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+        validateJavaSourceFiles(files);
+        final Path modelDir = output.resolve("src/main/java/org/openapitools/client/model");
+        assertThat(modelDir.resolve("Projects.java")).content()
+                .contains(
+                        "public Projects(List<String> o) {",
+                        "deserialized = tree.traverse(jp.getCodec()).readValueAs(new TypeReference<List<String>>() {});",
+                        "schemas.put(\"List<String>\", List.class);",
+                        "if (JSON.isInstanceOf(List.class, instance, new HashSet<Class<?>>())) {",
+                        "public List<String> getListString() throws ClassCastException {",
+                        "public UUID getUUID() throws ClassCastException {")
+                .doesNotContain("getList<String>()", "List<String>.class");
+        assertThat(modelDir.resolve("ProjectsRequestProjects.java")).content()
+                .contains("public List<String> getListString() throws ClassCastException {")
+                .doesNotContain("getList<String>()", "List<String>.class");
+        // List<BigDecimal> and List<Integer> have the same erasure: only one constructor and
+        // one instance check, but a getter for each.
+        assertThat(modelDir.resolve("Numbers.java")).content()
+                .contains(
+                        "public Numbers(List<BigDecimal> o) {",
+                        "public List<BigDecimal> getListBigDecimal() throws ClassCastException {",
+                        "public List<Integer> getListInteger() throws ClassCastException {")
+                .doesNotContain("public Numbers(List<Integer> o) {");
+        assertThat(modelDir.resolve("PetOrPets.java")).content()
+                .contains(
+                        "public List<Pet> getListPet() throws ClassCastException {",
+                        "if (getActualInstance() instanceof List) {")
+                .doesNotContain("instanceof List<Pet>");
+        assertThat(modelDir.resolve("CountsOrName.java")).content()
+                .contains(
+                        "readValueAs(new TypeReference<Map<String, Integer>>() {});",
+                        "public Map<String, Integer> getMapStringInteger() throws ClassCastException {",
+                        "if (getActualInstance() instanceof Map) {")
+                .doesNotContain("Map<String, Integer>.class", "instanceof Map<String, Integer>");
+        assertThat(modelDir.resolve("TagsOrLabel.java")).content()
+                .contains(
+                        "public TagsOrLabel(List<String> o) {",
+                        "readValueAs(new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {});",
+                        "schemas.put(\"List<String>\", List.class);",
+                        "public List<String> getListString() throws ClassCastException {",
+                        "public Integer getInteger() throws ClassCastException {")
+                .doesNotContain("getList<String>()", "List<String>.class");
+    }
+
     @Test
     public void testEnumWithImplements() {
         final Path output = newTempFolder();
@@ -4242,6 +4514,114 @@ public class JavaClientCodegenTest {
                 .generate().stream().collect(Collectors.toMap(File::getName, Function.identity()));
 
         JavaFileAssert.assertThat(files.get("Type.java")).fileContains("Type implements java.io.Serializable {");
+    }
+
+    @Test
+    public void testSerializableModelAddsSerializableToInnerEnums_issue23082() {
+        Map<String, File> files = generateFromContract(
+                "src/test/resources/3_0/issue_23082.yaml",
+                JavaClientCodegen.OKHTTP_GSON,
+                Map.of(SERIALIZABLE_MODEL, true));
+
+        JavaFileAssert.assertThat(files.get("ExampleWithInnerEnums.java")).fileContains(
+                "class ExampleWithInnerEnums implements Serializable {",
+                "enum ExampleInnerEnum implements Serializable {",
+                "enum NestedExamplesEnum implements Serializable {");
+    }
+
+    @Test
+    public void testSerializableModelTraversesEveryNestedPropertyLocation_issue23082() {
+        JavaClientCodegen codegen = new JavaClientCodegen();
+        codegen.additionalProperties().put(SERIALIZABLE_MODEL, true);
+        codegen.processOpts();
+
+        CodegenModel model = new CodegenModel();
+        CodegenProperty container = new CodegenProperty();
+        // components.schemas.Model.properties.container
+        model.vars.add(container);
+
+        CodegenProperty directEnum = newEnumProperty();
+        // properties.directEnum
+        container.vars.add(directEnum);
+
+        CodegenProperty arrayEnum = newEnumProperty();
+        CodegenProperty nestedArray = new CodegenProperty();
+        // type: array
+        // items:
+        //   type: array
+        //   items: { type: string, enum: [...] }
+        nestedArray.setItems(arrayEnum);
+        container.setItems(nestedArray);
+
+        CodegenProperty additionalPropertiesEnum = newEnumProperty();
+        // additionalProperties: { type: string, enum: [...] }
+        container.setAdditionalProperties(additionalPropertiesEnum);
+
+        CodegenProperty containsEnum = newEnumProperty();
+        // contains: { type: string, enum: [...] } (OpenAPI 3.1)
+        container.setContains(containsEnum);
+
+        CodegenProperty requiredPropertyEnum = newEnumProperty();
+        // required: [requiredProperty]
+        // properties.requiredProperty: { type: string, enum: [...] }
+        container.setRequiredVarsMap(Map.of("requiredProperty", requiredPropertyEnum));
+
+        CodegenProperty allOfEnum = newEnumProperty();
+        CodegenProperty oneOfEnum = newEnumProperty();
+        CodegenProperty anyOfEnum = newEnumProperty();
+        CodegenProperty notEnum = newEnumProperty();
+        // allOf: [{ type: string, enum: [...] }]
+        // oneOf: [{ type: string, enum: [...] }]
+        // anyOf: [{ type: string, enum: [...] }]
+        // not: { type: string, enum: [...] }
+        container.setComposedSchemas(new CodegenComposedSchemas(
+                List.of(allOfEnum), List.of(oneOfEnum), List.of(anyOfEnum), notEnum));
+
+        // Exercise model-level schema locations as well as property-level locations.
+        CodegenProperty modelItemsEnum = newEnumProperty();
+        // components.schemas.Model: { type: array, items: { type: string, enum: [...] } }
+        model.setItems(modelItemsEnum);
+        CodegenProperty modelAdditionalPropertiesEnum = newEnumProperty();
+        // components.schemas.Model: { type: object, additionalProperties: { type: string, enum: [...] } }
+        model.setAdditionalProperties(modelAdditionalPropertiesEnum);
+        CodegenProperty modelContainsEnum = newEnumProperty();
+        // components.schemas.Model: { type: array, contains: { type: string, enum: [...] } }
+        model.setContains(modelContainsEnum);
+
+        // A malformed or mutually recursive graph must not cause unbounded traversal.
+        container.vars.add(container);
+
+        ModelMap modelMap = new ModelMap();
+        modelMap.setModel(model);
+        ModelsMap modelsMap = new ModelsMap();
+        modelsMap.setModels(List.of(modelMap));
+        modelsMap.setImports(new ArrayList<>());
+
+        codegen.postProcessModels(modelsMap);
+
+        List<CodegenProperty> nestedEnums = List.of(
+                directEnum,
+                arrayEnum,
+                additionalPropertiesEnum,
+                containsEnum,
+                requiredPropertyEnum,
+                allOfEnum,
+                oneOfEnum,
+                anyOfEnum,
+                notEnum,
+                modelItemsEnum,
+                modelAdditionalPropertiesEnum,
+                modelContainsEnum);
+        for (CodegenProperty nestedEnum : nestedEnums) {
+            assertThat(nestedEnum.getVendorExtensions())
+                    .containsEntry(X_IMPLEMENTS, List.of("Serializable"));
+        }
+    }
+
+    private static CodegenProperty newEnumProperty() {
+        CodegenProperty property = new CodegenProperty();
+        property.isEnum = true;
+        return property;
     }
 
     /**
@@ -4748,6 +5128,67 @@ public class JavaClientCodegenTest {
         JavaFileAssert.assertThat(files.get("Fish.java"))
                 .isNormalClass()
                 .assertTypeAnnotations().containsWithName("Deprecated");
+    }
+
+    @Test
+    public void testWebClientDeprecatedOperation() {
+        final Map<String, File> files = generateFromContract("src/test/resources/3_0/petstore.yaml", WEBCLIENT);
+        JavaFileAssert.assertThat(files.get("PetApi.java"))
+                .assertMethod("findPetsByTags").hasAnnotation("Deprecated").commentContainsLines("@deprecated")
+                .toFileAssert()
+                .assertMethod("findPetsByTagsWithHttpInfo").hasAnnotation("Deprecated").commentContainsLines("@deprecated")
+                .toFileAssert()
+                .assertMethod("findPetsByTagsWithResponseSpec").hasAnnotation("Deprecated").commentContainsLines("@deprecated")
+                .toFileAssert()
+                .assertMethod("findPetsByStatus").doesNotHaveAnnotation("Deprecated")
+                .toFileAssert()
+                .assertMethod("findPetsByStatusWithHttpInfo").doesNotHaveAnnotation("Deprecated")
+                .toFileAssert()
+                .assertMethod("findPetsByStatusWithResponseSpec").doesNotHaveAnnotation("Deprecated");
+    }
+
+    @DataProvider
+    public static Object[] springBasedClients() {
+        return new Object[]{RESTTEMPLATE, RESTCLIENT, WEBCLIENT};
+    }
+
+    @Test(dataProvider = "springBasedClients")
+    public void shouldNotNullCheckRequiredParametersTwice(String library) {
+        final Map<String, File> files = generateFromContract(
+                "src/test/resources/3_0/petstore-with-fake-endpoints-models-for-testing.yaml", library);
+        final Path fakeApi = files.get("FakeApi.java").toPath();
+
+        // required parameters are already validated to be non-null, so they are added unconditionally
+        assertFileContains(fakeApi,
+                "Params.add(\"required_boolean_group\", apiClient.parameterToString(requiredBooleanGroup));",
+                "Params.add(\"number\", number);");
+        assertFileNotContains(fakeApi, "if (requiredBooleanGroup != null)", "if (number != null)");
+        // optional parameters are null-checked, with braces
+        assertFileContains(fakeApi,
+                "if (booleanGroup != null) {",
+                "if (integer != null) {");
+        // the request body is passed to invokeAPI directly
+        assertFileNotContains(fakeApi, "postBody", "PostBody");
+    }
+
+    @Test(dataProvider = "springBasedClients")
+    public void shouldUseDiamondOperatorWhereSupported(String library) {
+        for (boolean useJakartaEe : new boolean[]{false, true}) {
+            final Map<String, File> files = generateFromContract("src/test/resources/3_0/petstore.yaml", library,
+                    Map.of(JavaClientCodegen.USE_JAKARTA_EE, useJakartaEe));
+            final Path petApi = files.get("PetApi.java").toPath();
+
+            assertFileContains(petApi, "new LinkedMultiValueMap<>()");
+            assertFileNotContains(petApi, "new LinkedMultiValueMap<String", "new HashMap<String");
+            // the diamond operator is only supported for anonymous classes since Java 9
+            final boolean targetsJava17 = RESTCLIENT.equals(library) || useJakartaEe;
+            if (targetsJava17) {
+                assertFileContains(petApi, "new ParameterizedTypeReference<>() {}");
+            } else {
+                assertFileContains(petApi, "new ParameterizedTypeReference<Pet>() {}");
+                assertFileNotContains(petApi, "new ParameterizedTypeReference<>() {}");
+            }
+        }
     }
 
     @Test
@@ -5436,8 +5877,9 @@ public class JavaClientCodegenTest {
                 .setInputSpec("src/test/resources/3_2/query-operation.yaml")
                 .setOutputDir(output.toString().replace("\\", "/"));
 
-        new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
 
+        validateJavaSourceFiles(files);
         // the 3.2 'query' operation and the additionalOperations 'PURGE' entry
         // must both be generated, and the in: querystring parameter is emitted
         // as the whole (already encoded) query string appended to the path
@@ -5447,6 +5889,10 @@ public class JavaClientCodegenTest {
                 .contains("purgePetsCall(")
                 .contains("\"QUERY\"")
                 .contains("\"PURGE\"")
+                // additionalOperations keys are RFC 9110 tchar (no '"' or '\\')
+                // and must reach the wire verbatim, not HTML-escaped by Mustache
+                .contains("\"CHECK&FETCH\"")
+                .doesNotContain("&amp;")
                 .contains("localVarPath = localVarPath + (localVarPath.contains(\"?\") ? \"&\" : \"?\") + qs;");
     }
 
@@ -5459,8 +5905,9 @@ public class JavaClientCodegenTest {
                 .addAdditionalProperty("dynamicOperations", true)
                 .setOutputDir(output.toString().replace("\\", "/"));
 
-        new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
 
+        validateJavaSourceFiles(files);
         // dynamic operation lookup must register the 3.2 'query' operation and
         // additionalOperations entries, and fillParametersFromOperation must
         // accept `in: querystring`
@@ -5472,6 +5919,57 @@ public class JavaClientCodegenTest {
     }
 
     @Test
+    public void testAdditionalOperationsSkipsInvalidHttpMethodTokens() {
+        final Path output = newTempFolder();
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(JavaClientCodegen.class);
+        final String testThreadName = Thread.currentThread().getName();
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.addFilter(new Filter<ILoggingEvent>() {
+            @Override
+            public FilterReply decide(ILoggingEvent event) {
+                return testThreadName.equals(event.getThreadName())
+                        ? FilterReply.NEUTRAL : FilterReply.DENY;
+            }
+        });
+        listAppender.start();
+        logger.addAppender(listAppender);
+        try {
+            final CodegenConfigurator configurator = new CodegenConfigurator()
+                    .setGeneratorName(JAVA_GENERATOR) // default library okhttp-gson
+                    .setInputSpec("src/test/resources/3_2/java-invalid-method.yaml")
+                    .setOutputDir(output.toString().replace("\\", "/"));
+
+            List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+
+            validateJavaSourceFiles(files);
+            // additionalOperations keys that are not RFC 9110 tokens are
+            // skipped with a warning; valid tokens (including tchar
+            // punctuation) reach the generated code verbatim
+            assertThat(output.resolve("src/main/java/org/openapitools/client/api/DefaultApi.java"))
+                    .content()
+                    .contains("searchPetsCall(")
+                    .contains("checkFetchPetsCall(")
+                    .contains("\"SEARCH\"")
+                    .contains("\"CHECK&FETCH\"")
+                    .doesNotContain("badMethod")
+                    .doesNotContain("quotedMethod")
+                    .doesNotContain("unicodeMethod");
+            for (String method : new String[]{"BAD METHOD", "A\"B", "ÄÖ"}) {
+                boolean warned = listAppender.list.stream()
+                        .filter(e -> e.getLevel() == ch.qos.logback.classic.Level.WARN)
+                        .map(ILoggingEvent::getFormattedMessage)
+                        .anyMatch(msg -> msg.contains(method)
+                                && msg.contains("not a valid RFC 9110 token"));
+                Assert.assertTrue(warned,
+                        "expected a WARN mentioning '" + method + "' and 'not a valid RFC 9110 token'");
+            }
+        } finally {
+            logger.detachAppender(listAppender);
+        }
+    }
+
+    @Test
     public void testDynamicOperationsWithout32Operations() {
         final Path output = newTempFolder();
         final CodegenConfigurator configurator = new CodegenConfigurator()
@@ -5480,8 +5978,9 @@ public class JavaClientCodegenTest {
                 .addAdditionalProperty("dynamicOperations", true)
                 .setOutputDir(output.toString().replace("\\", "/"));
 
-        new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
+        List<File> files = new DefaultGenerator().opts(configurator.toClientOptInput()).generate();
 
+        validateJavaSourceFiles(files);
         // specs without `query`/`additionalOperations` must not emit calls to
         // PathItem.getQuery()/getAdditionalOperations() - the generated client's
         // pinned swagger-parser release has no such methods and would not compile

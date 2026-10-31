@@ -54,6 +54,7 @@ import java.util.stream.Stream;
 
 import static org.openapitools.codegen.CodegenConstants.INTERFACE_ONLY;
 import static org.openapitools.codegen.CodegenConstants.INTERFACE_ONLY_DESC;
+import static org.openapitools.codegen.CodegenConstants.X_IS_JACKSON_OPTIONAL_NULLABLE;
 import static org.openapitools.codegen.utils.CamelizeOption.LOWERCASE_FIRST_LETTER;
 import static org.openapitools.codegen.utils.StringUtils.camelize;
 
@@ -388,6 +389,8 @@ public class KotlinSpringServerCodegen extends AbstractKotlinCodegen
                         + "deserialization null-handling defers to the global ObjectMapper. When left unset it defaults to "
                         + "false (7.23.0-equivalent output) and logs a warning; set it explicitly to silence the warning.", false);
         cliOptions.add(CliOption.newBoolean(CodegenConstants.USE_DEDUCTION_FOR_ONE_OF_INTERFACES, CodegenConstants.USE_DEDUCTION_FOR_ONE_OF_INTERFACES_DESC, useDeductionForOneOfInterfaces));
+        cliOptions.add(CliOption.newBoolean(CodegenConstants.ENUM_UNKNOWN_DEFAULT_CASE, CodegenConstants.ENUM_UNKNOWN_DEFAULT_CASE_DESC).defaultValue("false"));
+
         addOption(CodegenConstants.TYPE_INFO_DEFAULT_IMPLS, CodegenConstants.TYPE_INFO_DEFAULT_IMPLS_DESC, "empty map");
         addSwitch(CodegenConstants.USE_ENUM_VALUE_INTERFACE, CodegenConstants.USE_ENUM_VALUE_INTERFACE_DESC, useEnumValueInterface);
         addSwitch(CodegenConstants.OPENAPI_NULLABLE,
@@ -761,6 +764,11 @@ public class KotlinSpringServerCodegen extends AbstractKotlinCodegen
             this.setSkipDefaultInterface(convertPropertyToBoolean(SKIP_DEFAULT_INTERFACE));
         }
         writePropertyBack(SKIP_DEFAULT_INTERFACE, skipDefaultInterface);
+
+        
+        if (additionalProperties.containsKey(CodegenConstants.ENUM_UNKNOWN_DEFAULT_CASE)) {
+            setEnumUnknownDefaultCase(Boolean.parseBoolean(additionalProperties.get(CodegenConstants.ENUM_UNKNOWN_DEFAULT_CASE).toString()));
+        }
 
         if (additionalProperties.containsKey(REACTIVE)) {
             if (SPRING_CLOUD_LIBRARY.equals(library)) {
@@ -1455,7 +1463,7 @@ public class KotlinSpringServerCodegen extends AbstractKotlinCodegen
         // Scenario 4: optional + nullable with openApiNullable → use JsonNullable<T> = JsonNullable.undefined()
         // so callers can distinguish between a missing key and an explicitly provided null.
         if (openApiNullable && !property.required && property.isNullable) {
-            property.vendorExtensions.put("x-is-jackson-optional-nullable", true);
+            property.vendorExtensions.put(X_IS_JACKSON_OPTIONAL_NULLABLE, true);
             model.imports.add("JsonNullable");
         }
 
@@ -1793,7 +1801,7 @@ public class KotlinSpringServerCodegen extends AbstractKotlinCodegen
                         optionalNonNullPropertyJsonSetterNulls, openApiNullable, true);
                 // Scenario 4: optional + nullable with openApiNullable → use JsonNullable<T>
                 if (openApiNullable && !var.required && var.isNullable) {
-                    var.vendorExtensions.put("x-is-jackson-optional-nullable", true);
+                    var.vendorExtensions.put(X_IS_JACKSON_OPTIONAL_NULLABLE, true);
                 }
                 resolveJsonIncludePolicy(cm, var);
             }
