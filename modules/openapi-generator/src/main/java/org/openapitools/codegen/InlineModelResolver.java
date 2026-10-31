@@ -149,6 +149,7 @@ public class InlineModelResolver {
     public InlineModelResolver() {
         this.inlineSchemaOptions.put("ARRAY_ITEM_SUFFIX", "_inner");
         this.inlineSchemaOptions.put("MAP_ITEM_SUFFIX", "_value");
+        this.inlineSchemaOptions.put("ITEM_SCHEMA_SUFFIX", "_item_schema");
     }
 
     public void setCodegen(CodegenConfig codegen) {
@@ -606,12 +607,12 @@ public class InlineModelResolver {
                 }
             }
             // OAS 3.2 itemSchema: inline models inside the per-item schema of a sequential
-            // media type are extracted exactly like schema's; a "_item" suffix keeps the
-            // backup name distinct when a media type declares both schema and itemSchema.
+            // media type are extracted exactly like schema's; the ITEM_SCHEMA_SUFFIX keeps
+            // the backup name distinct when a media type declares both schema and itemSchema
             Schema itemSchema = mediaType.getItemSchema();
             if (itemSchema != null) {
                 String itemSchemaName = resolveModelName(itemSchema.getTitle(),
-                        name == null ? null : name + "_item");
+                        name == null ? null : name + this.inlineSchemaOptions.get("ITEM_SCHEMA_SUFFIX"));
                 gatherInlineModels(itemSchema, itemSchemaName);
                 if (isModelNeeded(itemSchema)) {
                     mediaType.setItemSchema(this.makeSchemaInComponents(itemSchemaName, itemSchema));
@@ -1420,6 +1421,9 @@ public class InlineModelResolver {
         }
         for (MediaType mediaType : content.values()) {
             rewriteSchemaRefs(mediaType.getSchema(), refReplacements);
+            // OAS 3.2 itemSchema: a per-item $ref to a deduplicated-away model must be
+            // retargeted to the surviving component exactly like a schema $ref
+            rewriteSchemaRefs(mediaType.getItemSchema(), refReplacements);
             if (mediaType.getEncoding() != null) {
                 for (Encoding encoding : mediaType.getEncoding().values()) {
                     rewriteHeaderRefs(encoding.getHeaders(), refReplacements);

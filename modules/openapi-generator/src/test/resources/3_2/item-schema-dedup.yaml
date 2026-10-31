@@ -1,0 +1,29 @@
+openapi: 3.2.0
+info:
+  title: itemSchema dedup test
+  version: '1.0'
+paths:
+  /stream:
+    get:
+      operationId: streamDedup
+      responses:
+        '200':
+          description: itemSchema referencing a component that deduplication removes
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/EventCopy'
+components:
+  schemas:
+    Event:
+      title: Event
+      type: object
+      properties:
+        id:
+          type: string
+    EventCopy:
+      title: Event
+      type: object
+      properties:
+        id:
+          type: string

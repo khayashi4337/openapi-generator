@@ -1214,7 +1214,7 @@ public class DefaultCodegen implements CodegenConfig {
         List<String> mediaTypes = new ArrayList<>();
         Set<String> seenSchemas = new HashSet<>();
         for (Map.Entry<String, MediaType> entry : content.entrySet()) {
-            if (seenSchemas.add(mediaTypeKey(entry.getValue()))) {
+            if (seenSchemas.add(mediaTypeKey(entry.getKey(), entry.getValue()))) {
                 mediaTypes.add(entry.getKey());
             }
         }
@@ -1364,16 +1364,19 @@ public class DefaultCodegen implements CodegenConfig {
     }
 
     /**
-     * Stable identity key for a media-type: the keys of its {@code schema} and {@code itemSchema}.
-     * Two itemSchema-only media-types (OAS 3.2, e.g. a JSONL and an SSE stream) would otherwise
-     * share the key of a schema-less media-type and collapse into one axis position; an
-     * itemSchema-bearing media-type also never equals a schema-bearing one.
+     * Stable identity key for a media-type. Media types without {@code itemSchema} (all of
+     * OAS 3.0/3.1) keep the original key — the key of their {@code schema}, so a {@code null}
+     * media-type and a schema-less one still share the {@code "null"} key. Media types
+     * declaring {@code itemSchema} (OAS 3.2 sequential/streaming types) also differ by
+     * framing: {@code application/jsonl} and {@code application/json-seq} carrying the same
+     * Event are distinct axis positions, so the media type name joins the key.
      */
-    private static String mediaTypeKey(MediaType mediaType) {
-        if (mediaType == null) {
-            return "null";
+    private static String mediaTypeKey(String mediaTypeName, MediaType mediaType) {
+        if (mediaType == null || mediaType.getItemSchema() == null) {
+            return schemaKey(mediaType == null ? null : mediaType.getSchema());
         }
-        return schemaKey(mediaType.getSchema()) + "|itemSchema=" + schemaKey(mediaType.getItemSchema());
+        return mediaTypeName + "|schema=" + schemaKey(mediaType.getSchema())
+                + "|itemSchema=" + schemaKey(mediaType.getItemSchema());
     }
 
     /** Stable identity key for a schema: its {@code $ref} when present, else a structural key. */
@@ -7684,7 +7687,10 @@ public class DefaultCodegen implements CodegenConfig {
             LOGGER.debug("Cannot determine the content type. Returning null.");
             return null;
         }
-        return new ArrayList<>(requestBody.getContent().keySet()).get(0);
+        // OAS 3.2: when the body content declares sequential (itemSchema) media types, the
+        // Content-Type is the media type whose regular 'schema' the body model is taken
+        // from — generated code cannot yet send a stream, only the fallback representation
+        return ModelUtils.getMediaTypeNameFromContent(requestBody.getContent());
     }
 
     private void setOauth2Info(CodegenSecurity codegenSecurity, OAuthFlow flow) {
@@ -7723,7 +7729,13 @@ public class DefaultCodegen implements CodegenConfig {
             return;
         }
 
-        Set<String> consumes = requestBody.getContent().keySet();
+        // OAS 3.2: a body content declaring sequential (itemSchema) media types consumes
+        // only the media type the body schema is taken from — generated code cannot yet
+        // send the streamed encodings
+        String selectedMediaType = ModelUtils.getMediaTypeNameFromContent(requestBody.getContent());
+        Set<String> consumes = ModelUtils.hasItemSchema(requestBody.getContent())
+                ? (selectedMediaType == null ? Collections.emptySet() : Collections.singleton(selectedMediaType))
+                : requestBody.getContent().keySet();
         List<Map<String, String>> mediaTypeList = new ArrayList<>();
         for (String key : consumes) {
             Map<String, String> mediaType = new HashMap<>();
@@ -7752,6 +7764,12 @@ public class DefaultCodegen implements CodegenConfig {
 
         if (requestBody == null || requestBody.getContent() == null || requestBody.getContent().isEmpty()) {
             return Collections.emptySet(); // return empty set
+        }
+        // OAS 3.2: with sequential (itemSchema) media types declared, the operation consumes
+        // only the media type the body schema is taken from — see addConsumesInfo
+        if (ModelUtils.hasItemSchema(requestBody.getContent())) {
+            String selected = ModelUtils.getMediaTypeNameFromContent(requestBody.getContent());
+            return selected == null ? Collections.emptySet() : Collections.singleton(selected);
         }
         return requestBody.getContent().keySet();
     }
@@ -7801,6 +7819,11 @@ public class DefaultCodegen implements CodegenConfig {
         }
 
         for (String key : produces) {
+            // OAS 3.2: a media type declaring only itemSchema describes a sequential stream
+            // generated code cannot decode yet — it must not be sent in Accept
+            if (ModelUtils.isItemSchemaOnlyMediaType(response.getContent().get(key))) {
+                continue;
+            }
             // escape quotation to avoid code injection, "*/*" is a special case, do nothing
             String encodedKey = "*/*".equals(key) ? key : escapeQuotationMark(key);
             //Only unique media types should be added to "produces"
@@ -7836,18 +7859,46 @@ public class DefaultCodegen implements CodegenConfig {
 
         String variantMediaType = contentTypeVariantMediaType(operation, CodegenConstants.X_CONTENT_TYPE_VARIANT_RESPONSE);
         if (variantMediaType != null) {
-            produces.add(variantMediaType);
+            // OAS 3.2: a variant narrowed to a media type declaring only itemSchema produces
+            // nothing a generated client can decode yet — Accept stays empty
+            if (!isVariantItemSchemaOnly(openAPI, operation, variantMediaType)) {
+                produces.add(variantMediaType);
+            }
             return produces;
         }
 
         for (ApiResponse r : operation.getResponses().values()) {
             ApiResponse response = ModelUtils.getReferencedApiResponse(openAPI, r);
             if (response.getContent() != null) {
-                produces.addAll(response.getContent().keySet());
+                for (Map.Entry<String, MediaType> contentEntry : response.getContent().entrySet()) {
+                    // OAS 3.2: media types declaring only itemSchema must not be sent in Accept
+                    if (!ModelUtils.isItemSchemaOnlyMediaType(contentEntry.getValue())) {
+                        produces.add(contentEntry.getKey());
+                    }
+                }
             }
         }
 
         return produces;
+    }
+
+    /**
+     * Whether the media type {@code variantMediaType} — the single media type a content-type
+     * variant was narrowed to — declares only {@code itemSchema} (OAS 3.2 sequential media
+     * type) in the response that declares it.
+     */
+    private static boolean isVariantItemSchemaOnly(OpenAPI openAPI, Operation operation, String variantMediaType) {
+        if (operation.getResponses() == null) {
+            return false;
+        }
+        for (ApiResponse r : operation.getResponses().values()) {
+            ApiResponse response = ModelUtils.getReferencedApiResponse(openAPI, r);
+            if (response != null && response.getContent() != null
+                    && response.getContent().containsKey(variantMediaType)) {
+                return ModelUtils.isItemSchemaOnlyMediaType(response.getContent().get(variantMediaType));
+            }
+        }
+        return false;
     }
 
     protected String getCollectionFormat(Parameter parameter) {
@@ -8422,6 +8473,16 @@ public class DefaultCodegen implements CodegenConfig {
         return "SchemaFor" + mediaTypeSchemaSuffix + toModelName(contentType);
     }
 
+    /**
+     * The codegen property name for the per-item schema (OAS 3.2 {@code itemSchema}) of a
+     * sequential media type. Defaults to {@code "Item"} + {@link #toMediaTypeSchemaName};
+     * a dedicated hook so generators overriding media-type schema naming keep control of
+     * both names.
+     */
+    protected String toMediaTypeItemSchemaName(String contentType, String mediaTypeSchemaSuffix) {
+        return "Item" + toMediaTypeSchemaName(contentType, mediaTypeSchemaSuffix);
+    }
+
     private CodegenParameter headerToCodegenParameter(Header header, String headerName, Set<String> imports, String mediaTypeSchemaSuffix) {
         if (header == null) {
             return null;
@@ -8495,7 +8556,7 @@ public class DefaultCodegen implements CodegenConfig {
             // reach it as {{#content}}…{{#itemSchema}}; null for media types without itemSchema.
             CodegenProperty itemSchemaProp = null;
             if (mt.getItemSchema() != null) {
-                itemSchemaProp = fromProperty("Item" + toMediaTypeSchemaName(contentType, mediaTypeSchemaSuffix), mt.getItemSchema(), false);
+                itemSchemaProp = fromProperty(toMediaTypeItemSchemaName(contentType, mediaTypeSchemaSuffix), mt.getItemSchema(), false);
             }
             HashMap<String, SchemaTestCase> schemaTestCases = null;
             if (mt.getExtensions() != null && mt.getExtensions().containsKey(xSchemaTestExamplesKey)) {

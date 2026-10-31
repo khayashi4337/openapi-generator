@@ -46,6 +46,115 @@ paths:
                 $ref: '#/components/schemas/EventBatch'
               itemSchema:
                 $ref: '#/components/schemas/Event'
+  /events/filtered:
+    get:
+      operationId: listEventsFiltered
+      responses:
+        '200':
+          description: stream, then an empty media type, then the JSON fallback
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+            application/octet-stream: {}
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Event'
+  /events/empty-first:
+    get:
+      operationId: listEventsEmptyFirst
+      responses:
+        '200':
+          description: no itemSchema at all - the legacy first-media-type rule applies
+          content:
+            application/octet-stream: {}
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+  /events/streams:
+    get:
+      operationId: streamEventsMulti
+      responses:
+        '200':
+          description: two stream formats sharing one item schema, plus a JSON fallback
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+            application/json-seq:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Event'
+  /events/upload:
+    post:
+      operationId: uploadEvents
+      requestBody:
+        content:
+          application/jsonl:
+            itemSchema:
+              $ref: '#/components/schemas/Event'
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EventBatch'
+      responses:
+        '200':
+          description: stream first, JSON fallback second
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventBatch'
+  /events/ndjson:
+    get:
+      operationId: streamEventsNdjson
+      responses:
+        '200':
+          description: itemSchema-only response with a unique media type name
+          content:
+            application/x-ndjson:
+              itemSchema:
+                $ref: '#/components/schemas/Ping'
+  /events/normalized:
+    get:
+      operationId: streamEventsNormalized
+      responses:
+        '200':
+          description: itemSchema carrying a single-entry oneOf for the normalizer to simplify
+          content:
+            application/json-seq:
+              itemSchema:
+                oneOf:
+                  - $ref: '#/components/schemas/Event'
+  /events/both-inline:
+    get:
+      operationId: getBothInline
+      responses:
+        '200':
+          description: one media type declaring both schema and itemSchema inline, with a
+            schema property literally named 'item' to exercise the suffixes
+          content:
+            application/json-seq:
+              schema:
+                type: object
+                properties:
+                  item:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+              itemSchema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                  ts:
+                    type: integer
 components:
   schemas:
     Event:
@@ -62,3 +171,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Event'
+    Ping:
+      type: object
+      properties:
+        seq:
+          type: integer

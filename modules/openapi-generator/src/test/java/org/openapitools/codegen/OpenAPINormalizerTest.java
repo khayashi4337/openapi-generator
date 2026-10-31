@@ -105,6 +105,25 @@ public class OpenAPINormalizerTest {
     }
 
     @Test
+    public void testNormalizeContentItemSchema() {
+        // OAS 3.2: itemSchema inside a content section is normalized like schema —
+        // the default SIMPLIFY_ONEOF_ANYOF rule collapses its single-entry oneOf
+        OpenAPI openAPI = TestUtils.parseSpec("src/test/resources/3_2/item-schema.yaml");
+
+        MediaType mt = openAPI.getPaths().get("/events/normalized").getGet().getResponses()
+                .get("200").getContent().get("application/json-seq");
+        assertNotNull(mt.getItemSchema(), "precondition: itemSchema parsed");
+        assertNotNull(mt.getItemSchema().getOneOf(), "precondition: oneOf present before normalization");
+
+        OpenAPINormalizer openAPINormalizer = new OpenAPINormalizer(openAPI, new HashMap<>());
+        openAPINormalizer.normalize();
+
+        assertNull(mt.getItemSchema().getOneOf(),
+                "single-entry oneOf in itemSchema should be simplified like it is in schema");
+        assertEquals("#/components/schemas/Event", mt.getItemSchema().get$ref());
+    }
+
+    @Test
     public void testOpenAPINormalizerRefAsParentInAllOf() {
         // to test the rule REF_AS_PARENT_IN_ALLOF
         OpenAPI openAPI = TestUtils.parseSpec("src/test/resources/3_0/allOf_extension_parent.yaml");

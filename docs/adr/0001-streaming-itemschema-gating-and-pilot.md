@@ -200,11 +200,18 @@ JS/TSの`ReadableStream`/`AsyncIterable`はストリーミングとの適合度�
 
 ## Action Items
 
-1. [ ] `CodegenMediaType`に`itemSchema`(CodegenProperty)フィールドを追加
+1. [x] `CodegenMediaType`に`itemSchema`(CodegenProperty)フィールドを追加
    (コンストラクタ・equals・hashCodeも拡張、Codex指摘)
-2. [ ] `ModelUtils.getSchemaFromContent`等、itemSchemaを見ていない既存箇所を修正
+   → 実施済 (7d4150558c6)。equals・hashCode・toString・getter/setter は拡張したが、
+   コンストラクタは拡張しなかった: 既存コンストラクタのシグネチャを変えると
+   言語別ジェネレータや外部呼び出し側を壊すため、issue #62 の指示どおり setter 追加に留めた
+2. [x] `ModelUtils.getSchemaFromContent`等、itemSchemaを見ていない既存箇所を修正
    （`getSchemaFromContent:1482`、`visitContent:315-323`、`InlineModelResolver.flattenContent:587-610`、
    `OpenAPINormalizer.normalizeContent:556-571`、`axisOf:1209-1216`。Fable/Codex両方が指摘、要個別確認）
+   → 実施済 (7d4150558c6 + A1bレビュー修正)。列挙5箇所すべて変更。加えて `rewriteContentRefs`
+   (重複排除後の$ref書き換え)、`getContentType`/`addConsumesInfo`/`getConsumesInfo`/
+   `addProducesInfo`/`getProducesInfo`（送受信 media type を選択 schema と一致させる
+   フォールバック = ストリーム対応前の中間状態）も itemSchema 対応済み
 3. [ ] `CodegenConfig.supportsStreamingResponses()` capability追加（default false）。
    判定はmedia type単位（Decision参照）
 4. [ ] `DefaultCodegen.fromResponse`/`handleMethodResponse`/`fromRequestBody`に、

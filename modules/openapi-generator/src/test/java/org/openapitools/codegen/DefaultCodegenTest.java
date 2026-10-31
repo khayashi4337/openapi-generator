@@ -2975,6 +2975,147 @@ public class DefaultCodegenTest {
     }
 
     @Test
+    public void itemSchemaContentSkipsEmptyMediaTypeToFindSchema() {
+        // 3.2: an empty media type sitting between an itemSchema-only stream and the JSON
+        // fallback must not decide — the first media type declaring a regular 'schema' does
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation filteredOp = openAPI.getPaths().get("/events/filtered").getGet();
+        CodegenOperation co = codegen.fromOperation("/events/filtered", "get", filteredOp, null);
+
+        assertEquals("Event", co.returnBaseType);
+        assertNotNull(co.returnType, "return type must come from application/json's schema, not the empty media type");
+        assertTrue(co.isArray, "the fallback schema is an array of Event");
+        assertEquals("array", co.returnContainer);
+    }
+
+    @Test
+    public void contentWithoutItemSchemaKeepsFirstMediaTypeRule() {
+        // content declaring no itemSchema at all keeps the legacy rule: the first media
+        // type decides, so the empty application/octet-stream entry wins and the operation
+        // stays void even though a later entry carries a schema
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation emptyFirstOp = openAPI.getPaths().get("/events/empty-first").getGet();
+        CodegenOperation co = codegen.fromOperation("/events/empty-first", "get", emptyFirstOp, null);
+
+        assertNull(co.returnType, "no itemSchema declared: the first media type decides, as in 3.0/3.1");
+    }
+
+    @Test
+    public void itemSchemaStreamFormatsOccupySeparateAxisPositions() {
+        // 3.2: application/jsonl and application/json-seq carrying the same Event differ
+        // by framing — the content-type split must keep both plus the JSON fallback
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setSplitOperationsByContentType(true);
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        codegen.setOpenAPI(openAPI);
+
+        Operation get = openAPI.getPaths().get("/events/streams").getGet();
+        List<Operation> variants = codegen.divideOperationsByContentType(openAPI, "/events/streams", "get", get);
+        assertThat(variants).extracting(v -> v.getExtensions().get(CodegenConstants.X_CONTENT_TYPE_VARIANT_RESPONSE))
+                .containsExactlyInAnyOrder("application/jsonl", "application/json-seq", "application/json");
+
+        // a variant narrowed to an itemSchema-only stream produces nothing a generated
+        // client can decode yet; the JSON variant produces application/json
+        for (Operation variant : variants) {
+            Object mediaType = variant.getExtensions().get(CodegenConstants.X_CONTENT_TYPE_VARIANT_RESPONSE);
+            if ("application/json".equals(mediaType)) {
+                assertThat(DefaultCodegen.getProducesInfo(openAPI, variant)).containsExactly("application/json");
+            } else {
+                assertThat(DefaultCodegen.getProducesInfo(openAPI, variant)).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    public void requestConsumesAndResponseProducesFollowTheSelectedMediaType() {
+        // 3.2: a body declaring jsonl+itemSchema then json+schema is sent as
+        // application/json — the media type the body schema is taken from — and the
+        // response's Accept does not advertise the itemSchema-only stream
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation op = openAPI.getPaths().get("/events/upload").getPost();
+        CodegenOperation co = codegen.fromOperation("/events/upload", "post", op, null);
+
+        RequestBody requestBody = ModelUtils.getReferencedRequestBody(openAPI, op.getRequestBody());
+        assertEquals("application/json", codegen.getContentType(requestBody),
+                "Content-Type must be the media type whose schema the body parameter is typed by");
+        assertThat(DefaultCodegen.getConsumesInfo(openAPI, op)).containsExactly("application/json");
+        assertThat(mediaTypes(co.consumes)).containsExactly("application/json");
+        assertEquals("EventBatch", co.bodyParam.baseType);
+
+        assertThat(mediaTypes(co.produces)).containsExactly("application/json");
+        assertThat(DefaultCodegen.getProducesInfo(openAPI, op)).containsExactly("application/json");
+    }
+
+    @Test
+    public void itemSchemaOnlyWarningIsLoggedOnce() {
+        // a single itemSchema-only response reaches getSchemaFromContent several times
+        // during one fromOperation — once() keeps it to a single warning
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        testLogger.addAppender(listAppender);
+
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation streamOp = openAPI.getPaths().get("/events/ndjson").getGet();
+        codegen.fromOperation("/events/ndjson", "get", streamOp, null);
+
+        listAppender.stop();
+        testLogger.detachAppender(listAppender);
+
+        long warnCount = new ArrayList<>(listAppender.list).stream()
+                .filter(log -> Objects.equals(log.getThreadName(), Thread.currentThread().getName()))
+                .filter(log -> log.getLevel() == Level.WARN
+                        && log.getFormattedMessage().contains("application/x-ndjson"))
+                .count();
+        assertEquals(1, warnCount, "expected exactly one warning naming the itemSchema-only media type");
+    }
+
+    @Test
+    public void itemSchemaRefIsRewrittenWhenDedupRemovesItsModel() {
+        // deduplicateComponents removes EventCopy as a structural duplicate of Event —
+        // the itemSchema $ref naming EventCopy must be retargeted like a schema $ref
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema-dedup.yaml");
+
+        assertNull(openAPI.getComponents().getSchemas().get("EventCopy"),
+                "EventCopy should have been deduplicated away");
+        MediaType jsonl = openAPI.getPaths().get("/stream").getGet().getResponses()
+                .get("200").getContent().get("application/jsonl");
+        assertEquals("#/components/schemas/Event", jsonl.getItemSchema().get$ref());
+    }
+
+    @Test
+    public void itemSchemaInlineModelNameDoesNotCollideWithItemProperty() {
+        // the media type declares an inline schema holding a property literally named
+        // 'item' plus an inline itemSchema — the two must not fight over one model name
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+
+        assertNotNull(openAPI.getComponents().getSchemas().get("getBothInline_200_response_item"),
+                "inline object property 'item' keeps the _item-derived name");
+        assertNotNull(openAPI.getComponents().getSchemas().get("getBothInline_200_response_item_schema"),
+                "inline itemSchema object gets the _item_schema name");
+    }
+
+    @Test
+    public void itemSchemaOnlyReferenceKeepsModelUsed() {
+        // Ping is referenced only from an itemSchema — it must not be reported as an
+        // unused model by the visitContent-driven traversal
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        assertFalse(ModelUtils.getUnusedSchemas(openAPI).contains("Ping"),
+                "a model referenced only from itemSchema must still count as used");
+    }
+
+    @Test
     public void objectQueryParamIdentifyAsObject() {
         final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_0/objectQueryParam.yaml");
         new InlineModelResolver().flatten(openAPI);
