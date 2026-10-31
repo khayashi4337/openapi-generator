@@ -103,6 +103,9 @@ public class DefaultGenerator implements Generator {
     private final String generatorCheck = "spring";
     private final String templateCheck = "apiController.mustache";
 
+    private Map<String, List<String>> tagAncestorChains;
+    private OpenAPI tagAncestorChainsSource;
+
 
     public DefaultGenerator() {
         this(false);
@@ -686,6 +689,82 @@ public class DefaultGenerator implements Generator {
         return modelKeys;
     }
 
+    /**
+     * Lazily builds the ancestor chain of every tag declared in {@link OpenAPI#getTags()} once per
+     * parsed spec. The chain lists ancestor tag names ordered from the root down to the direct
+     * parent, so its last element is the resolved {@code parent} of the tag. A {@code parent}
+     * naming a tag that does not exist is logged once and the tag is treated as having no parent;
+     * a circular reference is logged once and the chain is truncated before entering the cycle.
+     *
+     * @return map of declared tag name to its ordered ancestor tag names (possibly empty lists)
+     */
+    private Map<String, List<String>> resolveTagAncestorChains() {
+        if (tagAncestorChains == null || tagAncestorChainsSource != openAPI) {
+            tagAncestorChainsSource = openAPI;
+            tagAncestorChains = buildTagAncestorChains();
+        }
+        return tagAncestorChains;
+    }
+
+    private Map<String, List<String>> buildTagAncestorChains() {
+        Map<String, List<String>> chains = new HashMap<>();
+        List<Tag> swaggerTags = openAPI == null ? null : openAPI.getTags();
+        if (swaggerTags == null) {
+            return chains;
+        }
+        Map<String, Tag> byName = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        for (Tag tag : swaggerTags) {
+            if (tag.getName() != null) {
+                byName.putIfAbsent(tag.getName(), tag);
+            }
+        }
+        Set<String> warned = new HashSet<>();
+        for (Tag tag : swaggerTags) {
+            String name = tag.getName();
+            if (name == null || chains.containsKey(name)) {
+                continue;
+            }
+            List<String> chain = new ArrayList<>();
+            List<String> order = new ArrayList<>();
+            Set<String> seen = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            seen.add(name);
+            order.add(name);
+            Tag current = tag;
+            while (current.getParent() != null) {
+                Tag parent = byName.get(current.getParent());
+                if (parent == null) {
+                    if (warned.add("missing:" + current.getName())) {
+                        LOGGER.warn("Tag '{}' declares parent '{}' which is not a defined tag; treating it as having no parent",
+                                current.getName(), current.getParent());
+                    }
+                    break;
+                }
+                if (!seen.add(parent.getName())) {
+                    int cycleStart = 0;
+                    for (int i = 0; i < order.size(); i++) {
+                        if (order.get(i).equalsIgnoreCase(parent.getName())) {
+                            cycleStart = i;
+                            break;
+                        }
+                    }
+                    Set<String> cycle = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+                    cycle.addAll(order.subList(cycleStart, order.size()));
+                    if (warned.add("cycle:" + String.join(",", cycle))) {
+                        LOGGER.warn("Circular tag parent reference detected at tag '{}'; ancestor chain truncated",
+                                parent.getName());
+                    }
+                    break;
+                }
+                chain.add(parent.getName());
+                order.add(parent.getName());
+                current = parent;
+            }
+            Collections.reverse(chain);
+            chains.put(name, chain);
+        }
+        return chains;
+    }
+
     void generateApis(List<File> files, List<OperationsMap> allOperations, List<ModelMap> allModels) {
         if (!generateApis) {
             // TODO: Process these anyway and present info via dryRun?
@@ -729,6 +808,31 @@ public class DefaultGenerator implements Generator {
                         .filter(Objects::nonNull)
                         .findFirst()
                         .ifPresent(description -> operation.put("operationTagDescription", config.escapeText(description)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getSummary)
+                        .filter(Objects::nonNull)
+                        .findFirst()
+                        .ifPresent(summary -> operation.put("operationTagSummary", config.escapeText(summary)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getKind)
+                        .filter(Objects::nonNull)
+                        .findFirst()
+                        .ifPresent(kind -> operation.put("operationTagKind", config.escapeText(kind)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getName)
+                        .filter(Objects::nonNull)
+                        .map(resolveTagAncestorChains()::get)
+                        .filter(Objects::nonNull)
+                        .filter(ancestors -> !ancestors.isEmpty())
+                        .findFirst()
+                        .ifPresent(ancestors -> {
+                            operation.put("operationTagParent", config.escapeText(ancestors.get(ancestors.size() - 1)));
+                            operation.put("operationTagAncestors",
+                                    ancestors.stream().map(config::escapeText).collect(Collectors.toList()));
+                        });
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -888,6 +992,31 @@ public class DefaultGenerator implements Generator {
                         .filter(Objects::nonNull)
                         .findFirst()
                         .ifPresent(description -> operation.put("operationTagDescription", config.escapeText(description)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getSummary)
+                        .filter(Objects::nonNull)
+                        .findFirst()
+                        .ifPresent(summary -> operation.put("operationTagSummary", config.escapeText(summary)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getKind)
+                        .filter(Objects::nonNull)
+                        .findFirst()
+                        .ifPresent(kind -> operation.put("operationTagKind", config.escapeText(kind)));
+                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                        .map(Tag::getName)
+                        .filter(Objects::nonNull)
+                        .map(resolveTagAncestorChains()::get)
+                        .filter(Objects::nonNull)
+                        .filter(ancestors -> !ancestors.isEmpty())
+                        .findFirst()
+                        .ifPresent(ancestors -> {
+                            operation.put("operationTagParent", config.escapeText(ancestors.get(ancestors.size() - 1)));
+                            operation.put("operationTagAncestors",
+                                    ancestors.stream().map(config::escapeText).collect(Collectors.toList()));
+                        });
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());

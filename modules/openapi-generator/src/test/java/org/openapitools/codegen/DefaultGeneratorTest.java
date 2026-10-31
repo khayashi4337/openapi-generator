@@ -1,5 +1,7 @@
 package org.openapitools.codegen;
 
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.Operation;
 import io.swagger.v3.oas.models.PathItem;
@@ -16,6 +18,7 @@ import org.openapitools.codegen.config.GlobalSettings;
 import org.openapitools.codegen.model.ModelMap;
 import org.openapitools.codegen.model.OperationsMap;
 import org.openapitools.codegen.utils.ModelUtils;
+import org.slf4j.LoggerFactory;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
@@ -1183,6 +1186,82 @@ public class DefaultGeneratorTest {
         } finally {
             GlobalSettings.reset();
             output.deleteOnExit();
+        }
+    }
+
+    @Test
+    public void testTagSummaryParentKindInOperationMap() {
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/tag-hierarchy.yaml");
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        DefaultCodegen config = new DefaultCodegen();
+        opts.config(config);
+        final DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        generator.configureGeneratorProperties();
+
+        ch.qos.logback.classic.Logger logger =
+                (ch.qos.logback.classic.Logger) LoggerFactory.getLogger(DefaultGenerator.class);
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        logger.addAppender(listAppender);
+        try {
+            List<OperationsMap> allOperations = new ArrayList<>();
+            generator.generateApis(new ArrayList<>(), allOperations, new ArrayList<>());
+
+            Map<String, OperationsMap> byTag = new HashMap<>();
+            for (OperationsMap operation : allOperations) {
+                byTag.put((String) operation.get("operationTagName"), operation);
+            }
+
+            OperationsMap puppies = byTag.get("puppies");
+            Assert.assertNotNull(puppies);
+            Assert.assertEquals(puppies.get("operationTagParent"), "dogs");
+            Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList("pets", "dogs"));
+
+            OperationsMap pets = byTag.get("pets");
+            Assert.assertNotNull(pets);
+            Assert.assertEquals(pets.get("operationTagSummary"), "Pets Summary");
+            Assert.assertEquals(pets.get("operationTagKind"), "nav");
+            Assert.assertFalse(pets.containsKey("operationTagParent"));
+            Assert.assertFalse(pets.containsKey("operationTagAncestors"));
+
+            OperationsMap orphan = byTag.get("orphan");
+            Assert.assertNotNull(orphan);
+            Assert.assertFalse(orphan.containsKey("operationTagParent"));
+            Assert.assertFalse(orphan.containsKey("operationTagAncestors"));
+
+            OperationsMap a = byTag.get("a");
+            Assert.assertNotNull(a);
+            Assert.assertEquals(a.get("operationTagParent"), "b");
+            Assert.assertEquals(a.get("operationTagAncestors"), Collections.singletonList("b"));
+
+            OperationsMap b = byTag.get("b");
+            Assert.assertNotNull(b);
+            Assert.assertEquals(b.get("operationTagParent"), "a");
+            Assert.assertEquals(b.get("operationTagAncestors"), Collections.singletonList("a"));
+
+            CodegenOperation puppiesOperation = puppies.getOperations().getOperation().get(0);
+            Assert.assertEquals(puppiesOperation.tags.get(0).getParent(), "dogs");
+
+            boolean warnedMissing = false;
+            boolean warnedCycle = false;
+            for (ILoggingEvent event : listAppender.list) {
+                if (event.getLevel() != ch.qos.logback.classic.Level.WARN) {
+                    continue;
+                }
+                String message = event.getFormattedMessage();
+                if (message.contains("orphan") && message.contains("missing")) {
+                    warnedMissing = true;
+                }
+                if (message.contains("Circular tag parent")) {
+                    warnedCycle = true;
+                }
+            }
+            Assert.assertTrue(warnedMissing, "expected a WARN about tag 'orphan' declaring a missing parent");
+            Assert.assertTrue(warnedCycle, "expected a WARN about a circular tag parent reference");
+        } finally {
+            logger.detachAppender(listAppender);
         }
     }
 

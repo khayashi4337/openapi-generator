@@ -1,0 +1,68 @@
+openapi: 3.2.0
+info:
+  title: tag hierarchy test
+  version: '1.0'
+tags:
+  - name: pets
+    summary: Pets Summary
+    description: Pet operations
+    kind: nav
+  - name: dogs
+    parent: pets
+  - name: puppies
+    parent: dogs
+  - name: orphan
+    parent: missing
+  - name: a
+    parent: b
+  - name: b
+    parent: a
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      tags:
+        - pets
+      responses:
+        '200':
+          description: ok
+  /dogs:
+    get:
+      operationId: listDogs
+      tags:
+        - dogs
+      responses:
+        '200':
+          description: ok
+  /puppies:
+    get:
+      operationId: listPuppies
+      tags:
+        - puppies
+      responses:
+        '200':
+          description: ok
+  /orphan:
+    get:
+      operationId: showOrphan
+      tags:
+        - orphan
+      responses:
+        '200':
+          description: ok
+  /a:
+    get:
+      operationId: opA
+      tags:
+        - a
+      responses:
+        '200':
+          description: ok
+  /b:
+    get:
+      operationId: opB
+      tags:
+        - b
+      responses:
+        '200':
+          description: ok
