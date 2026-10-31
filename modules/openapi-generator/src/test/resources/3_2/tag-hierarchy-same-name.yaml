@@ -1,0 +1,28 @@
+openapi: 3.2.0
+info:
+  title: tag hierarchy same-name test
+  version: '1.0'
+tags:
+  - name: root-tag
+    summary: Root Tag Summary
+    kind: nav
+  - name: shared
+    parent: root-tag
+paths:
+  /shared:
+    get:
+      operationId: getShared
+      tags:
+        - shared
+      responses:
+        '200':
+          description: ok
+webhooks:
+  sharedChanged:
+    post:
+      operationId: onSharedChanged
+      tags:
+        - shared
+      responses:
+        '200':
+          description: ok

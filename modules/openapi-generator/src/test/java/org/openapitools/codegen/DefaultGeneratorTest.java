@@ -1286,6 +1286,45 @@ public class DefaultGeneratorTest {
             CodegenOperation puppiesOperation = puppies.getOperations().getOperation().get(0);
             Assert.assertEquals(puppiesOperation.tags.get(0).getParent(), "dogs");
 
+            // operationTagBreadcrumb walks the effective parent map where group-level
+            // cycles are cut: puppies keeps its ancestors, x stops at group A
+            Assert.assertEquals(puppies.get("operationTagBreadcrumb"), Arrays.asList(
+                    Map.of("name", "pets", "baseName", "Pets", "hasOperations", true,
+                            "classname", "PetsApi", "fileName", "PetsApi.md"),
+                    Map.of("name", "dogs", "baseName", "Dogs", "hasOperations", true,
+                            "classname", "DogsApi", "fileName", "DogsApi.md")));
+            Assert.assertEquals(x.get("operationTagBreadcrumb"),
+                    Collections.singletonList(Map.of("name", "a", "baseName", "A",
+                            "hasOperations", true, "classname", "AApi", "fileName", "AApi.md")));
+            Assert.assertFalse(a.containsKey("operationTagBreadcrumb"));
+            Assert.assertFalse(b.containsKey("operationTagBreadcrumb"));
+
+            // 'Alpha' -> 'Beta' -> 'alpha' is no cycle in raw names but is one after
+            // sanitizeTag merged 'Alpha'/'alpha' into group 'Alpha': both edges are cut
+            OperationsMap alpha = byTag.get("Alpha");
+            Assert.assertNotNull(alpha);
+            Assert.assertFalse(alpha.containsKey("operationTagBreadcrumb"));
+            OperationsMap beta = byTag.get("Beta");
+            Assert.assertNotNull(beta);
+            Assert.assertFalse(beta.containsKey("operationTagBreadcrumb"));
+
+            // 'foo-bar' and 'foo_bar' sanitize to one group 'FooBar'; the operation names
+            // 'foo_bar' so the group resolves to that declared tag and its parent 'two'
+            OperationsMap fooBar = byTag.get("FooBar");
+            Assert.assertNotNull(fooBar);
+            Assert.assertEquals(fooBar.get("operationTagParent"), "two");
+            Assert.assertEquals(fooBar.get("operationTagBreadcrumb"),
+                    Collections.singletonList(Map.of("name", "two", "baseName", "Two",
+                            "hasOperations", false)));
+
+            // the breadcrumb name flows through escapeMarkdownText, which for a plain
+            // DefaultCodegen keeps escapeText's verbatim behavior
+            OperationsMap escChild = byTag.get("EscChild");
+            Assert.assertNotNull(escChild);
+            Assert.assertEquals(escChild.get("operationTagBreadcrumb"),
+                    Collections.singletonList(Map.of("name", "<team> [x](url)", "baseName", "TeamXUrl",
+                            "hasOperations", false)));
+
             // missing parents: 'orphan' -> 'missing' and 'Root' -> 'root', once each
             Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 2);
             // distinct cycles: {a,b}, {"c,d",e} and {c,"d,e"}, once each
@@ -1306,12 +1345,18 @@ public class DefaultGeneratorTest {
             Assert.assertEquals(webhookPet.get("operationTagKind"), "nav");
             Assert.assertEquals(webhookPet.get("operationTagParent"), "pet-store");
             Assert.assertEquals(webhookPet.get("operationTagParentBaseName"), "PetStore");
-            // 'pet-store' has no webhook operations, so it is marked hasOperations=false here
+            // hasOperations is judged against the api+webhook union: 'pet-store' has api
+            // operations, so webhook docs can link to its generated api document
             Assert.assertEquals(webhookPet.get("operationTagAncestors"),
-                    Collections.singletonList(Map.of("name", "pet-store", "baseName", "PetStore", "hasOperations", false)));
+                    Collections.singletonList(Map.of("name", "pet-store", "baseName", "PetStore", "hasOperations", true, "classname", "PetStoreApi")));
+            Assert.assertEquals(webhookPet.get("operationTagBreadcrumb"),
+                    Collections.singletonList(Map.of("name", "pet-store", "baseName", "PetStore",
+                            "hasOperations", true, "classname", "PetStoreApi", "fileName", "PetStoreApi.md")));
 
-            Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 2);
-            Assert.assertEquals(countWarnContaining(listAppender, "Circular tag parent reference"), 3);
+            // missing/cycle warnings are de-duplicated across the whole generation: the
+            // webhooks phase re-walks the same tags but must not repeat a single warning
+            Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 0);
+            Assert.assertEquals(countWarnContaining(listAppender, "Circular tag parent reference"), 0);
         } finally {
             logger.detachAppender(listAppender);
         }

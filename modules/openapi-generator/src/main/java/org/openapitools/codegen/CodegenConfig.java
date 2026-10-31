@@ -105,6 +105,19 @@ public interface CodegenConfig {
 
     String escapeText(String text);
 
+    /**
+     * Escapes a short label for display inside generated markdown — the tag hierarchy and
+     * breadcrumb metadata generators place in operation and supporting-file maps. The
+     * default delegates to {@link #escapeText(String)}; documentation generators emitting
+     * markdown override this to additionally escape markdown metacharacters.
+     *
+     * @param text raw display text
+     * @return text safe to render verbatim in a markdown document
+     */
+    default String escapeMarkdownText(String text) {
+        return escapeText(text);
+    }
+
     String escapeTextWhileAllowingNewLines(String text);
 
     String encodePath(String text);

@@ -42,6 +42,21 @@ tags:
     summary: Webhook Pet Summary
     kind: nav
     parent: pet-store
+  - name: Alpha
+    parent: Beta
+  - name: Beta
+    parent: alpha
+  - name: alpha
+  - name: foo-bar
+    parent: one
+  - name: foo_bar
+    parent: two
+  - name: one
+  - name: two
+  - name: "<team> [x](url)"
+    summary: "a|b *c*"
+  - name: esc-child
+    parent: "<team> [x](url)"
 paths:
   /pets:
     get:
@@ -168,6 +183,38 @@ paths:
       operationId: listCats
       tags:
         - cats
+      responses:
+        '200':
+          description: ok
+  /alpha:
+    get:
+      operationId: opAlpha
+      tags:
+        - Alpha
+      responses:
+        '200':
+          description: ok
+  /beta:
+    get:
+      operationId: opBeta
+      tags:
+        - Beta
+      responses:
+        '200':
+          description: ok
+  /foo-bar:
+    get:
+      operationId: opFooBar
+      tags:
+        - foo_bar
+      responses:
+        '200':
+          description: ok
+  /esc-child:
+    get:
+      operationId: opEscChild
+      tags:
+        - esc-child
       responses:
         '200':
           description: ok

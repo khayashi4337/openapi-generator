@@ -7,6 +7,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.File;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import static org.openapitools.codegen.utils.StringUtils.escape;
 
@@ -117,6 +120,38 @@ public class MarkdownDocumentationCodegen extends DefaultCodegen implements Code
     @Override
     public GeneratorLanguage generatorLanguage() {
         return null;
+    }
+
+    private static final Map<String, String> MARKDOWN_DISPLAY_ESCAPES;
+    static {
+        // only the characters that would break markdown syntax in a display label;
+        // deliberately not specialCharReplacements, which also maps '/' for name mangling
+        Map<String, String> escapes = new LinkedHashMap<>();
+        escapes.put("\\", "\\\\");
+        escapes.put("`", "\\`");
+        escapes.put("*", "\\*");
+        escapes.put("_", "\\_");
+        escapes.put("[", "\\[");
+        escapes.put("]", "\\]");
+        escapes.put("<", "\\<");
+        escapes.put(">", "\\>");
+        escapes.put("|", "\\|");
+        MARKDOWN_DISPLAY_ESCAPES = Collections.unmodifiableMap(escapes);
+    }
+
+    /**
+     * Escapes a label for verbatim display in markdown: whitespace control characters are
+     * flattened and a backslash is prepended to each markdown metacharacter
+     * ({@code \}, {@code `}, {@code *}, {@code _}, {@code [}, {@code ]}, {@code <},
+     * {@code >}, {@code |}) so e.g. {@code <team>} cannot start an inline HTML tag,
+     * {@code [x](url)} cannot render as a link, and {@code |} cannot break a table.
+     */
+    @Override
+    public String escapeMarkdownText(String input) {
+        if (input == null) {
+            return null;
+        }
+        return escape(input.replaceAll("[\\t\\n\\r]", " "), MARKDOWN_DISPLAY_ESCAPES, null, null);
     }
 
     @Override

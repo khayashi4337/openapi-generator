@@ -722,6 +722,37 @@ public class DefaultGenerator implements Generator {
      * @return the resolved declared tag, or {@code null} when no declared tag maps to the group
      */
     private Tag resolveGroupTag(String groupName, List<CodegenOperation> ops, Map<String, List<Tag>> tagsByGroupName) {
+        return resolveGroupTagByTagNames(groupName, tagRefsOf(ops), tagsByGroupName);
+    }
+
+    /**
+     * One tag-name list per operation, in operation order — the shape
+     * {@link #resolveGroupTagByTagNames} scans. {@link CodegenOperation#tags} carries the
+     * operation's tag names verbatim (resolved against declared tags when possible), so its
+     * names are identical to the raw spec tag names.
+     */
+    private List<List<String>> tagRefsOf(List<CodegenOperation> ops) {
+        List<List<String>> refs = new ArrayList<>();
+        if (ops != null) {
+            for (CodegenOperation op : ops) {
+                if (op.tags != null && !op.tags.isEmpty()) {
+                    List<String> names = new ArrayList<>(op.tags.size());
+                    for (Tag tag : op.tags) {
+                        names.add(tag.getName());
+                    }
+                    refs.add(names);
+                }
+            }
+        }
+        return refs;
+    }
+
+    /**
+     * {@link #resolveGroupTag} on raw tag-name lists, so callers that only scanned the spec
+     * (e.g. the api side seeing webhook groups) apply the exact same selection rule.
+     */
+    private Tag resolveGroupTagByTagNames(String groupName, List<List<String>> opTagNames,
+                                          Map<String, List<Tag>> tagsByGroupName) {
         List<Tag> declared = tagsByGroupName.get(groupName);
         if (declared == null || declared.isEmpty()) {
             return null;
@@ -730,19 +761,26 @@ public class DefaultGenerator implements Generator {
         for (Tag tag : declared) {
             byName.put(tag.getName(), tag);
         }
-        for (CodegenOperation op : ops) {
-            if (op.tags == null) {
-                continue;
-            }
-            for (Tag candidate : op.tags) {
-                Tag match = byName.get(candidate.getName());
-                if (match != null) {
-                    return match;
+        if (opTagNames != null) {
+            for (List<String> tagNames : opTagNames) {
+                if (tagNames == null) {
+                    continue;
+                }
+                for (String name : tagNames) {
+                    Tag match = byName.get(name);
+                    if (match != null) {
+                        return match;
+                    }
                 }
             }
         }
         return declared.get(0);
     }
+
+    // warnings are de-duplicated across the whole generation (apis and webhooks phases
+    // share these sets, so each missing parent and each cycle is reported only once)
+    private final Set<String> warnedMissingParents = new HashSet<>();
+    private final Set<Set<String>> warnedCycles = new HashSet<>();
 
     /**
      * Builds the ancestor chain of every tag declared in {@code tags} ({@link OpenAPI#getTags()}).
@@ -750,25 +788,16 @@ public class DefaultGenerator implements Generator {
      * last element is the tag's resolved {@code parent}. Parent references are resolved against
      * declared tag names with exact, case-sensitive equality — the OpenAPI 3.2 Tag Object defines
      * {@code parent} as the name of a tag and specifies no case-insensitive matching. A
-     * {@code parent} naming a tag that does not exist is logged once per declaring tag and the tag
-     * is treated as having no parent. A circular reference is logged once per distinct cycle; the
-     * chain keeps every tag walked before the hop that would re-enter an already visited tag, so
-     * a tag on a path into a cycle keeps the cycle members it reached — e.g. {@code x -> a -> b -> a}
-     * gives {@code x} ancestors {@code [b, a]}.
+     * {@code parent} naming a tag that does not exist is logged once per generation and the tag
+     * is treated as having no parent. A circular reference is logged once per generation per
+     * distinct cycle; the chain keeps every tag walked before the hop that would re-enter an
+     * already visited tag, so a tag on a path into a cycle keeps the cycle members it reached —
+     * e.g. {@code x -> a -> b -> a} gives {@code x} ancestors {@code [b, a]}.
      *
      * @param tags declared tags, may be {@code null}
      * @return map of declared tag name to its ordered ancestor tag names (possibly empty lists)
      */
     private Map<String, List<String>> buildTagAncestorChains(List<Tag> tags) {
-        return buildTagAncestorChains(tags, true);
-    }
-
-    /**
-     * Same as {@link #buildTagAncestorChains(List)}; pass {@code emitWarnings=false} for
-     * additional walks over the same document (e.g. the supporting-file hierarchy) so the
-     * missing-parent and cycle warnings are not repeated.
-     */
-    private Map<String, List<String>> buildTagAncestorChains(List<Tag> tags, boolean emitWarnings) {
         Map<String, List<String>> chains = new HashMap<>();
         if (tags == null) {
             return chains;
@@ -779,8 +808,6 @@ public class DefaultGenerator implements Generator {
                 byName.putIfAbsent(tag.getName(), tag);
             }
         }
-        Set<String> warnedMissingParents = new HashSet<>();
-        Set<Set<String>> warnedCycles = new HashSet<>();
         for (Tag tag : tags) {
             String name = tag.getName();
             if (name == null || chains.containsKey(name)) {
@@ -795,7 +822,7 @@ public class DefaultGenerator implements Generator {
             while (current.getParent() != null) {
                 Tag parent = byName.get(current.getParent());
                 if (parent == null) {
-                    if (emitWarnings && warnedMissingParents.add(current.getName())) {
+                    if (warnedMissingParents.add(current.getName())) {
                         LOGGER.warn("Tag '{}' declares parent '{}' which is not a defined tag; treating it as having no parent",
                                 current.getName(), current.getParent());
                     }
@@ -803,7 +830,7 @@ public class DefaultGenerator implements Generator {
                 }
                 if (!seen.add(parent.getName())) {
                     Set<String> cycle = new TreeSet<>(order.subList(order.indexOf(parent.getName()), order.size()));
-                    if (emitWarnings && warnedCycles.add(cycle)) {
+                    if (warnedCycles.add(cycle)) {
                         LOGGER.warn("Circular tag parent reference detected at tag '{}'; ancestor chain stops before re-entering it",
                                 parent.getName());
                     }
@@ -817,6 +844,223 @@ public class DefaultGenerator implements Generator {
             chains.put(name, chain);
         }
         return chains;
+    }
+
+    /**
+     * Lightweight pass over raw spec items collecting, for every operation, the group names
+     * it would land in ({@link CodegenConfig#sanitizeTag(String)} of each tag name) and its raw
+     * tag-name list — the same shape the real grouping produces, without running the operation
+     * pipeline. Used for the api+webhook union that decides {@code hasOperations} and tag
+     * resolution when the other context's group map is not built yet. Operations flagged
+     * {@code x-internal} are skipped and operations without tags land in the {@code default}
+     * group, the same rules the real grouping uses.
+     *
+     * @param items         path or webhook items, may be {@code null}
+     * @param names         receives every produced group name
+     * @param refsByGroup   receives, per group, each operation's raw tag-name list in scan
+     *                      order — the refs {@link #resolveGroupTagByTagNames} consumes
+     * @param allowedGroups when non-null and non-empty, only these group names are collected
+     *                      (mirrors the caller's generate filter)
+     */
+    private void collectItemTagRefs(Map<String, PathItem> items, Set<String> names,
+                                    Map<String, List<List<String>>> refsByGroup, Set<String> allowedGroups) {
+        if (items == null) {
+            return;
+        }
+        for (PathItem path : items.values()) {
+            if (path == null) {
+                continue;
+            }
+            List<Operation> ops = new ArrayList<>();
+            if (path.readOperationsMap() != null) {
+                ops.addAll(path.readOperationsMap().values());
+            }
+            if (config.supportsAdditionalOperations()) {
+                if (path.getQuery() != null) {
+                    ops.add(path.getQuery());
+                }
+                if (path.getAdditionalOperations() != null) {
+                    ops.addAll(path.getAdditionalOperations().values());
+                }
+            }
+            for (Operation op : ops) {
+                if (op == null) {
+                    continue;
+                }
+                if (op.getExtensions() != null && Boolean.TRUE.equals(op.getExtensions().get(X_INTERNAL))) {
+                    continue;
+                }
+                List<String> tagNames = op.getTags();
+                if (tagNames == null || tagNames.isEmpty()) {
+                    String group = config.sanitizeTag("default");
+                    if (allowedGroups == null || allowedGroups.isEmpty() || allowedGroups.contains(group)) {
+                        names.add(group);
+                        refsByGroup.computeIfAbsent(group, k -> new ArrayList<>())
+                                .add(Collections.singletonList("default"));
+                    }
+                } else {
+                    for (String tagName : tagNames) {
+                        String group = config.sanitizeTag(tagName);
+                        if (allowedGroups == null || allowedGroups.isEmpty() || allowedGroups.contains(group)) {
+                            names.add(group);
+                            refsByGroup.computeIfAbsent(group, k -> new ArrayList<>()).add(tagNames);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Adds each operation map's tag-name refs (see {@link #tagRefsOf}) to {@code refsByGroup}
+     * and records the map's {@code baseName} in {@code groupOrder}, preserving iteration
+     * order — the group's first-appearance order in the generated output.
+     */
+    private void collectOpsMapTagRefs(List<? extends Map<String, Object>> maps,
+                                      Map<String, List<List<String>>> refsByGroup,
+                                      Set<String> groupOrder) {
+        if (maps == null) {
+            return;
+        }
+        for (Map<String, Object> map : maps) {
+            String baseName = (String) map.get("baseName");
+            if (baseName == null) {
+                continue;
+            }
+            groupOrder.add(baseName);
+            refsByGroup.computeIfAbsent(baseName, k -> new ArrayList<>());
+            Object operations = map.get("operations");
+            if (operations instanceof OperationMap) {
+                refsByGroup.get(baseName).addAll(tagRefsOf(((OperationMap) operations).getOperation()));
+            }
+        }
+    }
+
+    /**
+     * Computes the effective parent of every group name in the api+webhook union: the group's
+     * resolved declared tag's {@code parent}, resolved against declared tag names and rewritten
+     * to the parent's sanitized group name. Tag resolution follows the single
+     * {@link #resolveGroupTag} rule (operations' tags first, else first declared tag), so this
+     * table, the README tree, and the {@code operationTagBreadcrumb} metadata all agree on which
+     * tag a group stands for. Missing parents and edges pointing back at the same group are
+     * dropped. Cycles formed at the <em>group-name</em> level — including cycles that only exist
+     * after {@code sanitizeTag} merged distinct tag names — are then cut: every group sitting on
+     * a group-level cycle loses its parent edge and becomes a root, which guarantees the DFS
+     * emits every group exactly once.
+     *
+     * @param tagRefsByGroup       group name to its operations' tag-name lists, from real
+     *                             operation maps and/or {@link #collectItemTagRefs} scans
+     * @param operationGroupNames  all group names in scope (the api+webhook union)
+     * @return map of group name to its effective parent group name; absent means root
+     */
+    private Map<String, String> buildEffectiveTagParents(
+            Map<String, List<List<String>>> tagRefsByGroup, Set<String> operationGroupNames) {
+        List<Tag> declaredTags = openAPI == null ? null : openAPI.getTags();
+        Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
+        Map<String, Tag> tagsByName = new HashMap<>();
+        if (declaredTags != null) {
+            for (Tag tag : declaredTags) {
+                if (tag.getName() != null) {
+                    tagsByName.putIfAbsent(tag.getName(), tag);
+                }
+            }
+        }
+        Set<String> universe = new LinkedHashSet<>(tagsByGroupName.keySet());
+        universe.addAll(operationGroupNames);
+        Map<String, String> parents = new LinkedHashMap<>();
+        for (String group : universe) {
+            Tag resolved = resolveGroupTagByTagNames(group,
+                    tagRefsByGroup.getOrDefault(group, Collections.emptyList()), tagsByGroupName);
+            if (resolved == null || resolved.getParent() == null) {
+                continue;
+            }
+            Tag parent = tagsByName.get(resolved.getParent());
+            if (parent == null) {
+                continue;
+            }
+            String parentGroup = config.sanitizeTag(parent.getName());
+            if (!parentGroup.equals(group)) {
+                parents.put(group, parentGroup);
+            }
+        }
+        // a group on a cycle can be reached from itself; cut its edge so it becomes a root
+        Set<String> cyclic = new HashSet<>();
+        for (String group : universe) {
+            Set<String> seen = new HashSet<>();
+            String cursor = group;
+            while ((cursor = parents.get(cursor)) != null) {
+                if (cursor.equals(group)) {
+                    cyclic.add(group);
+                    break;
+                }
+                if (!seen.add(cursor)) {
+                    break;
+                }
+            }
+        }
+        cyclic.forEach(parents::remove);
+        return parents;
+    }
+
+    /**
+     * Display name for an operation group whose name does not resolve to a declared tag: the
+     * raw tag name carried by the group's operations, or the group name itself as a fallback.
+     */
+    private String groupDisplayName(List<List<String>> opTagNames, String baseName) {
+        if (opTagNames != null) {
+            for (List<String> tagNames : opTagNames) {
+                if (tagNames == null) {
+                    continue;
+                }
+                for (String name : tagNames) {
+                    if (name != null && baseName.equals(config.sanitizeTag(name))) {
+                        return name;
+                    }
+                }
+            }
+        }
+        return baseName;
+    }
+
+    /**
+     * Builds the {@code operationTagBreadcrumb} list for one operation map: the group's ancestor
+     * groups ordered root to direct parent, walked over the effective parent map so group-level
+     * cycles are already cut — unlike {@code operationTagAncestors}, which keeps the raw
+     * declared-tag chains of the original contract. Each entry carries {@code name} (escaped for
+     * display), {@code baseName}, {@code hasOperations} (judged against the api+webhook union,
+     * since e.g. the markdown generator emits api documents for webhook groups too), and
+     * {@code classname}/{@code fileName} ({@code config.toApiName}/{@code toApiFilename}) when the
+     * ancestor group has operations.
+     */
+    private List<Map<String, Object>> buildTagBreadcrumb(
+            String group, Map<String, String> effectiveParents,
+            Map<String, List<List<String>>> tagRefsByGroup, Set<String> operationGroupNames,
+            Map<String, List<Tag>> tagsByGroupName) {
+        List<String> chain = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        seen.add(group);
+        for (String cursor = effectiveParents.get(group); cursor != null && seen.add(cursor);
+             cursor = effectiveParents.get(cursor)) {
+            chain.add(cursor);
+        }
+        Collections.reverse(chain);
+        List<Map<String, Object>> breadcrumb = new ArrayList<>(chain.size());
+        for (String ancestor : chain) {
+            Map<String, Object> entry = new HashMap<>(4);
+            Tag ancestorTag = resolveGroupTagByTagNames(ancestor,
+                    tagRefsByGroup.getOrDefault(ancestor, Collections.emptyList()), tagsByGroupName);
+            entry.put("name", config.escapeMarkdownText(ancestorTag != null && ancestorTag.getName() != null
+                    ? ancestorTag.getName() : ancestor));
+            entry.put("baseName", ancestor);
+            boolean hasOperations = operationGroupNames.contains(ancestor);
+            entry.put("hasOperations", hasOperations);
+            if (hasOperations) {
+                entry.put("classname", config.toApiName(ancestor));
+                entry.put("fileName", config.toApiFilename(ancestor) + apiDocFileSuffix());
+            }
+            breadcrumb.add(entry);
+        }
+        return breadcrumb;
     }
 
     /**
@@ -839,6 +1083,11 @@ public class DefaultGenerator implements Generator {
      *       group-name form), {@code hasOperations}, and {@code classname}
      *       ({@code config.toApiName(baseName)} when the ancestor group has operations) — usable
      *       as {@code {{#operationTagAncestors}}{{name}} {{baseName}}{{/operationTagAncestors}}}</li>
+     *   <li>{@code operationTagBreadcrumb}: a list of maps ordered from the root to the direct
+     *       parent, walked over the effective parent map ({@link #buildEffectiveTagParents}) —
+     *       the same edges the documentation tree uses, with group-level cycles cut; each entry
+     *       has {@code name}, {@code baseName}, {@code hasOperations} (api+webhook union), and
+     *       {@code classname}/{@code fileName} when the ancestor group has operations</li>
      * </ul>
      * Absent values are simply not added.
      *
@@ -847,10 +1096,15 @@ public class DefaultGenerator implements Generator {
      * @param ops                  operations grouped under {@code tag}
      * @param tagsByGroupName      declared tags by group name, from {@link #buildTagsByGroupName}
      * @param tagAncestorChains    ancestor chains, from {@link #buildTagAncestorChains}
-     * @param operationGroupNames  group names that have operations in this map's set
+     * @param effectiveParents     effective parent map, from {@link #buildEffectiveTagParents}
+     * @param tagRefsByGroup       group name to its operations' tag-name lists
+     * @param operationGroupNames  group names that have operations across the api+webhook
+     *                             union — the scope {@code hasOperations} is judged in, since
+     *                             e.g. markdown emits api documents for webhook groups too
      */
     private void putTagMetadata(Map<String, Object> operation, String tag, List<CodegenOperation> ops,
                                 Map<String, List<Tag>> tagsByGroupName, Map<String, List<String>> tagAncestorChains,
+                                Map<String, String> effectiveParents, Map<String, List<List<String>>> tagRefsByGroup,
                                 Set<String> operationGroupNames) {
         Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
                 .map(Tag::getName)
@@ -896,49 +1150,35 @@ public class DefaultGenerator implements Generator {
             ancestorMaps.add(entry);
         }
         operation.put("operationTagAncestors", ancestorMaps);
-    }
-
-    /**
-     * True when {@code name} sits on a tag-parent cycle: following each tag's resolved parent
-     * (the last element of its ancestor chain) eventually returns to {@code name}.
-     */
-    private boolean isTagOnCycle(String name, Map<String, List<String>> chains) {
-        Set<String> walked = new HashSet<>();
-        String current = name;
-        while (true) {
-            List<String> chain = chains.get(current);
-            if (chain == null || chain.isEmpty()) {
-                return false;
-            }
-            String parent = chain.get(chain.size() - 1);
-            if (parent.equals(name)) {
-                return true;
-            }
-            if (!walked.add(parent)) {
-                return false;
-            }
-            current = parent;
+        List<Map<String, Object>> breadcrumb = buildTagBreadcrumb(
+                tag, effectiveParents, tagRefsByGroup, operationGroupNames, tagsByGroupName);
+        if (!breadcrumb.isEmpty()) {
+            operation.put("operationTagBreadcrumb", breadcrumb);
         }
     }
 
     /**
-     * Display name for an operation group whose name does not resolve to a declared tag: the
-     * raw tag name carried by the group's operations, or the group name itself as a fallback.
+     * Relative directory of the emitted api documents, derived from {@code apiPackage} — the
+     * same folder {@link CodegenConfig#apiFileFolder()} writes to, relative to the output
+     * root. The {@code apiDocPath} property is deliberately not consulted: it only feeds
+     * template links and does not move the emitted files.
      */
-    private String operationTagDisplayName(OperationsMap operation, String baseName) {
-        if (operation.getOperations() != null && operation.getOperations().getOperation() != null) {
-            for (CodegenOperation op : operation.getOperations().getOperation()) {
-                if (op.tags == null) {
-                    continue;
-                }
-                for (Tag candidate : op.tags) {
-                    if (candidate.getName() != null && baseName.equals(config.sanitizeTag(candidate.getName()))) {
-                        return candidate.getName();
-                    }
-                }
-            }
+    private String apiDocDir() {
+        String dir = config.apiPackage() == null ? "" : config.apiPackage().replace('.', '/');
+        while (dir.startsWith("/") || dir.startsWith(File.separator)) {
+            dir = dir.substring(1);
         }
-        return baseName;
+        return dir.isEmpty() ? "" : dir + "/";
+    }
+
+    /**
+     * File suffix the generator's api template emits (e.g. {@code .md} for markdown),
+     * read from the {@code api.mustache} entry of {@link CodegenConfig#apiTemplateFiles()}.
+     */
+    private String apiDocFileSuffix() {
+        Map<String, String> apiTemplates = config.apiTemplateFiles();
+        String suffix = apiTemplates == null ? null : apiTemplates.get("api.mustache");
+        return suffix == null ? ".md" : suffix;
     }
 
     /**
@@ -947,111 +1187,129 @@ public class DefaultGenerator implements Generator {
      * {@code apiTagHierarchy} key out of the bundle then, so documents without tag parents stay
      * unchanged.
      *
-     * <p>Roots are nodes without a resolved parent — declared tags with no parent, a missing
-     * parent, or a parent edge cut because the tag sits on a cycle (the same treatment as
-     * operation-map metadata, so no extra warnings are emitted) — in {@link OpenAPI#getTags()}
-     * order, followed by undeclared operation groups in order of first appearance. Children are
-     * linked through the resolved parent and also follow declaration order. A declared tag with
-     * no operations is still emitted as a node. Each item carries {@code name} (escaped for
-     * display), {@code baseName} (the sanitized group name), {@code hasOperations},
-     * {@code indent} (two spaces per depth level), {@code classname}
-     * ({@code config.toApiName(baseName)}, only for tags with operations), and declared
-     * {@code summary}/{@code kind} (escaped) when present.
+     * <p>Every group's display {@code name}, {@code summary}/{@code kind}, and parent edge come
+     * from the tag {@link #resolveGroupTag} picks for it — the same single rule the
+     * operation-map metadata and {@code operationTagBreadcrumb} use — and the edges are walked
+     * over the effective parent map ({@link #buildEffectiveTagParents}), which already drops
+     * missing parents and cuts group-level cycles, so every group appears exactly once. Roots
+     * (nodes without an effective parent among the nodes) follow {@link OpenAPI#getTags()}
+     * order, then undeclared operation groups in order of first appearance; children also
+     * follow declaration order, and a declared tag with no operations is still emitted as a
+     * node. Each item carries {@code name} (escaped for display), {@code baseName} (the
+     * sanitized group name), {@code hasOperations} (true for api <em>and</em> webhook groups —
+     * e.g. markdown emits api documents for webhook groups too), {@code indent} (two spaces
+     * per depth level), {@code classname} ({@code config.toApiName(baseName)}) and {@code link}
+     * (the group's api document path relative to the README, built from {@code apiPackage} and
+     * {@code toApiFilename}) when the group has operations, plus declared
+     * {@code summary}/{@code kind} (escaped) when present. A safety net finally emits any
+     * group the DFS could not reach as an extra root, so no group is ever lost.
      *
-     * @param allOperations operation maps, used to tell which groups have operations
-     * @return depth-first-ordered hierarchy items, or an empty list when no tag has a parent
+     * @param allOperations api operation maps
+     * @param allWebhooks   webhook operation maps, may be {@code null}
+     * @return depth-first-ordered hierarchy items, or an empty list when no tag sets a parent
      */
-    private List<Map<String, Object>> buildApiTagHierarchy(List<OperationsMap> allOperations) {
+    private List<Map<String, Object>> buildApiTagHierarchy(List<OperationsMap> allOperations,
+                                                           List<WebhooksMap> allWebhooks) {
         List<Tag> declaredTags = openAPI == null ? null : openAPI.getTags();
         boolean anyParent = declaredTags != null && declaredTags.stream()
                 .anyMatch(tag -> tag.getParent() != null);
         if (!anyParent) {
             return Collections.emptyList();
         }
-        Map<String, List<String>> chains = buildTagAncestorChains(declaredTags, false);
-        // nodes keyed by group name; declared tags first in declaration order, then undeclared
-        // operation groups in order of first appearance
+        // api+webhook union of operation groups feeds node membership, hasOperations, and
+        // the tag-name refs used for tag resolution (api groups first, so resolution of a
+        // shared group is deterministic)
+        Map<String, List<List<String>>> tagRefsByGroup = new LinkedHashMap<>();
+        Set<String> operationGroupNames = new LinkedHashSet<>();
+        collectOpsMapTagRefs(allOperations, tagRefsByGroup, operationGroupNames);
+        collectOpsMapTagRefs(allWebhooks, tagRefsByGroup, operationGroupNames);
+        Map<String, String> effectiveParents = buildEffectiveTagParents(tagRefsByGroup, operationGroupNames);
+        Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
+        // nodes keyed by group name; declared groups first in declaration order, then
+        // undeclared operation groups in order of first appearance
         Map<String, Map<String, Object>> nodes = new LinkedHashMap<>();
-        Map<String, Tag> firstDeclaredByGroup = new HashMap<>();
-        if (declaredTags != null) {
-            for (Tag tag : declaredTags) {
-                if (tag.getName() == null) {
-                    continue;
+        for (String baseName : tagsByGroupName.keySet()) {
+            Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
+            node.put("baseName", baseName);
+            node.put("hasOperations", false);
+            Tag resolved = resolveGroupTagByTagNames(baseName,
+                    tagRefsByGroup.getOrDefault(baseName, Collections.emptyList()), tagsByGroupName);
+            node.put("name", config.escapeMarkdownText(resolved != null && resolved.getName() != null
+                    ? resolved.getName() : baseName));
+            if (resolved != null) {
+                if (resolved.getSummary() != null) {
+                    node.put("summary", config.escapeMarkdownText(resolved.getSummary()));
                 }
-                String baseName = config.sanitizeTag(tag.getName());
-                firstDeclaredByGroup.putIfAbsent(baseName, tag);
-                Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
-                node.put("name", config.escapeText(tag.getName()));
+                if (resolved.getKind() != null) {
+                    node.put("kind", config.escapeMarkdownText(resolved.getKind()));
+                }
+            }
+        }
+        String apiDocDir = apiDocDir();
+        String apiDocSuffix = apiDocFileSuffix();
+        for (String baseName : operationGroupNames) {
+            Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
+            node.put("hasOperations", true);
+            node.put("classname", config.toApiName(baseName));
+            node.put("link", apiDocDir + config.toApiFilename(baseName) + apiDocSuffix);
+            if (!node.containsKey("name")) {
+                node.put("name", config.escapeMarkdownText(
+                        groupDisplayName(tagRefsByGroup.get(baseName), baseName)));
                 node.put("baseName", baseName);
-                node.put("hasOperations", false);
-                if (tag.getSummary() != null) {
-                    node.put("summary", config.escapeText(tag.getSummary()));
-                }
-                if (tag.getKind() != null) {
-                    node.put("kind", config.escapeText(tag.getKind()));
-                }
             }
         }
-        if (allOperations != null) {
-            for (OperationsMap operation : allOperations) {
-                String baseName = (String) operation.get("baseName");
-                if (baseName == null) {
-                    continue;
-                }
-                Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
-                node.put("hasOperations", true);
-                node.put("classname", config.toApiName(baseName));
-                if (!node.containsKey("name")) {
-                    node.put("name", config.escapeText(operationTagDisplayName(operation, baseName)));
-                    node.put("baseName", baseName);
-                }
-            }
-        }
-        // parent edge of each node, cut for cycle members and self-references so the tree stays
-        // a forest; children are collected in declaration order
-        Map<String, String> parentOf = new HashMap<>();
+        // children lists follow node (declaration) order; edges come from the effective map
         Map<String, List<String>> childrenOf = new HashMap<>();
-        for (Map.Entry<String, Map<String, Object>> entry : nodes.entrySet()) {
-            String baseName = entry.getKey();
-            Tag declared = firstDeclaredByGroup.get(baseName);
-            if (declared == null) {
-                continue;
+        for (String baseName : nodes.keySet()) {
+            String parentBaseName = effectiveParents.get(baseName);
+            if (parentBaseName != null && nodes.containsKey(parentBaseName)) {
+                childrenOf.computeIfAbsent(parentBaseName, k -> new ArrayList<>()).add(baseName);
             }
-            List<String> chain = chains.get(declared.getName());
-            if (chain == null || chain.isEmpty() || isTagOnCycle(declared.getName(), chains)) {
-                continue;
-            }
-            String parentBaseName = config.sanitizeTag(chain.get(chain.size() - 1));
-            if (parentBaseName.equals(baseName) || !nodes.containsKey(parentBaseName)) {
-                continue;
-            }
-            parentOf.put(baseName, parentBaseName);
-            childrenOf.computeIfAbsent(parentBaseName, k -> new ArrayList<>()).add(baseName);
         }
         List<Map<String, Object>> items = new ArrayList<>();
+        Set<String> visited = new HashSet<>();
         Deque<Map.Entry<String, Integer>> stack = new ArrayDeque<>();
         List<String> roots = new ArrayList<>();
         for (String baseName : nodes.keySet()) {
-            if (!parentOf.containsKey(baseName)) {
+            String parentBaseName = effectiveParents.get(baseName);
+            if (parentBaseName == null || !nodes.containsKey(parentBaseName)) {
                 roots.add(baseName);
             }
         }
         for (int i = roots.size() - 1; i >= 0; i--) {
             stack.push(new AbstractMap.SimpleEntry<>(roots.get(i), 0));
         }
-        while (!stack.isEmpty()) {
-            Map.Entry<String, Integer> next = stack.pop();
-            String baseName = next.getKey();
-            int depth = next.getValue();
-            Map<String, Object> item = new LinkedHashMap<>(nodes.get(baseName));
-            item.put("indent", "  ".repeat(depth));
-            items.add(item);
-            List<String> children = childrenOf.get(baseName);
-            if (children != null) {
-                for (int i = children.size() - 1; i >= 0; i--) {
-                    stack.push(new AbstractMap.SimpleEntry<>(children.get(i), depth + 1));
+        // safety net inside the loop: after the roots' DFS, any group still unvisited is
+        // pushed as an extra root, so no group is ever dropped from the list
+        while (true) {
+            while (!stack.isEmpty()) {
+                Map.Entry<String, Integer> next = stack.pop();
+                String baseName = next.getKey();
+                if (!visited.add(baseName)) {
+                    continue;
+                }
+                int depth = next.getValue();
+                Map<String, Object> item = new LinkedHashMap<>(nodes.get(baseName));
+                item.put("indent", "  ".repeat(depth));
+                items.add(item);
+                List<String> children = childrenOf.get(baseName);
+                if (children != null) {
+                    for (int i = children.size() - 1; i >= 0; i--) {
+                        stack.push(new AbstractMap.SimpleEntry<>(children.get(i), depth + 1));
+                    }
                 }
             }
+            String leftover = null;
+            for (String baseName : nodes.keySet()) {
+                if (!visited.contains(baseName)) {
+                    leftover = baseName;
+                    break;
+                }
+            }
+            if (leftover == null) {
+                break;
+            }
+            stack.push(new AbstractMap.SimpleEntry<>(leftover, 0));
         }
         return items;
     }
@@ -1076,6 +1334,19 @@ public class DefaultGenerator implements Generator {
         List<Tag> declaredTags = openAPI.getTags();
         Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
         Map<String, List<String>> tagAncestorChains = buildTagAncestorChains(declaredTags);
+        // api+webhook union: hasOperations/effective parents count webhook groups too, so a
+        // group that only has webhooks still links to its generated api document
+        Set<String> operationGroupNames = new LinkedHashSet<>(paths.keySet());
+        Map<String, List<List<String>>> tagRefsByGroup = new LinkedHashMap<>();
+        for (Map.Entry<String, List<CodegenOperation>> entry : paths.entrySet()) {
+            tagRefsByGroup.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                    .addAll(tagRefsOf(entry.getValue()));
+        }
+        if (Boolean.TRUE.equals(generateWebhooks)) {
+            collectItemTagRefs(openAPI.getWebhooks(), operationGroupNames, tagRefsByGroup,
+                    getPropertyAsSet(CodegenConstants.WEBHOOKS));
+        }
+        Map<String, String> effectiveParents = buildEffectiveTagParents(tagRefsByGroup, operationGroupNames);
         for (String tag : paths.keySet()) {
             try {
                 List<CodegenOperation> ops = paths.get(tag);
@@ -1089,7 +1360,8 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                putTagMetadata(operation, tag, ops, tagsByGroupName, tagAncestorChains, paths.keySet());
+                putTagMetadata(operation, tag, ops, tagsByGroupName, tagAncestorChains,
+                        effectiveParents, tagRefsByGroup, operationGroupNames);
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -1229,6 +1501,18 @@ public class DefaultGenerator implements Generator {
         List<Tag> declaredTags = openAPI.getTags();
         Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
         Map<String, List<String>> tagAncestorChains = buildTagAncestorChains(declaredTags);
+        // api+webhook union, mirrored from generateApis so both sides agree on hasOperations
+        Set<String> operationGroupNames = new LinkedHashSet<>(webhooks.keySet());
+        Map<String, List<List<String>>> tagRefsByGroup = new LinkedHashMap<>();
+        for (Map.Entry<String, List<CodegenOperation>> entry : webhooks.entrySet()) {
+            tagRefsByGroup.computeIfAbsent(entry.getKey(), k -> new ArrayList<>())
+                    .addAll(tagRefsOf(entry.getValue()));
+        }
+        if (Boolean.TRUE.equals(generateApis)) {
+            collectItemTagRefs(openAPI.getPaths(), operationGroupNames, tagRefsByGroup,
+                    getPropertyAsSet(CodegenConstants.APIS));
+        }
+        Map<String, String> effectiveParents = buildEffectiveTagParents(tagRefsByGroup, operationGroupNames);
         for (String tag : webhooks.keySet()) {
             try {
                 List<CodegenOperation> wks = webhooks.get(tag);
@@ -1239,7 +1523,8 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                putTagMetadata(operation, tag, wks, tagsByGroupName, tagAncestorChains, webhooks.keySet());
+                putTagMetadata(operation, tag, wks, tagsByGroupName, tagAncestorChains,
+                        effectiveParents, tagRefsByGroup, operationGroupNames);
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -1532,7 +1817,7 @@ public class DefaultGenerator implements Generator {
         }
         bundle.put("contextPath", contextPath);
         bundle.put("apiInfo", apis);
-        List<Map<String, Object>> apiTagHierarchy = buildApiTagHierarchy(allOperations);
+        List<Map<String, Object>> apiTagHierarchy = buildApiTagHierarchy(allOperations, allWebhooks);
         if (!apiTagHierarchy.isEmpty()) {
             bundle.put("apiTagHierarchy", apiTagHierarchy);
         }
