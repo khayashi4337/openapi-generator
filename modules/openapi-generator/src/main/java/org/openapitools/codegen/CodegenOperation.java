@@ -30,7 +30,11 @@ public class CodegenOperation {
             hasVersionHeaders = false, hasVersionQueryParams = false,
             isResponseBinary = false, isResponseFile = false, isResponseOptional = false, hasReference = false, defaultReturnType = false,
             isDeprecated, isCallbackRequest, uniqueItems,
-            hasErrorResponseObject; // if 4xx, 5xx responses have at least one error object defined
+            hasErrorResponseObject, // if 4xx, 5xx responses have at least one error object defined
+            isStreamingResponse;    // method response is carried only by OAS 3.2 sequential (itemSchema) media types
+    public String streamingMediaType; // the sequential media type carrying the response, e.g. application/jsonl
+    public String streamingFormat;    // wire format family: "jsonl", "json-seq", "sse", or "other"
+    public CodegenProperty streamingItemType; // the per-item schema (MediaType.itemSchema) of streamingMediaType
     public CodegenProperty returnProperty;
     public String path, operationId, returnType, returnFormat, httpMethod, returnBaseType,
             returnContainer, summary, unescapedNotes, notes, baseName, defaultResponse;
@@ -421,6 +425,10 @@ public class CodegenOperation {
         sb.append(", hasErrorResponseObject=").append(hasErrorResponseObject);
         sb.append(", isDeprecated=").append(isDeprecated);
         sb.append(", isCallbackRequest=").append(isCallbackRequest);
+        sb.append(", isStreamingResponse=").append(isStreamingResponse);
+        sb.append(", streamingMediaType='").append(streamingMediaType).append('\'');
+        sb.append(", streamingFormat='").append(streamingFormat).append('\'');
+        sb.append(", streamingItemType=").append(streamingItemType);
         sb.append(", uniqueItems='").append(uniqueItems);
         sb.append(", path='").append(path).append('\'');
         sb.append(", operationId='").append(operationId).append('\'');
@@ -492,8 +500,12 @@ public class CodegenOperation {
                 hasErrorResponseObject == that.hasErrorResponseObject &&
                 isDeprecated == that.isDeprecated &&
                 isCallbackRequest == that.isCallbackRequest &&
+                isStreamingResponse == that.isStreamingResponse &&
                 uniqueItems == that.uniqueItems &&
                 Objects.equals(returnProperty, that.returnProperty) &&
+                Objects.equals(streamingMediaType, that.streamingMediaType) &&
+                Objects.equals(streamingFormat, that.streamingFormat) &&
+                Objects.equals(streamingItemType, that.streamingItemType) &&
                 Objects.equals(responseHeaders, that.responseHeaders) &&
                 Objects.equals(path, that.path) &&
                 Objects.equals(operationId, that.operationId) &&
@@ -552,6 +564,7 @@ public class CodegenOperation {
                 pathParams, queryParams, headerParams, formParams, cookieParams, requiredParams, returnProperty, optionalParams,
                 authMethods, tags, responses, callbacks, imports, examples, requestBodyExamples, externalDocs,
                 vendorExtensions, nickname, operationIdOriginal, operationIdLowerCase, operationIdCamelCase,
-                operationIdSnakeCase, hasErrorResponseObject, requiredAndNotNullableParams, notNullableParams, constantParams);
+                operationIdSnakeCase, hasErrorResponseObject, requiredAndNotNullableParams, notNullableParams, constantParams,
+                isStreamingResponse, streamingMediaType, streamingFormat, streamingItemType);
     }
 }

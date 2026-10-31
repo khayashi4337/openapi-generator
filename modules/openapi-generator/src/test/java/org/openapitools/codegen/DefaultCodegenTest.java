@@ -2889,29 +2889,31 @@ public class DefaultCodegenTest {
         listAppender.start();
         testLogger.addAppender(listAppender);
 
-        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        // dedicated fixture: OnceLogger deduplicates identical messages JVM-wide for
+        // 2s, so the warning text must not be emitted by any other test beforehand
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema-warn.yaml");
         final DefaultCodegen codegen = new DefaultCodegen();
         codegen.setOpenAPI(openAPI);
 
-        Operation streamOp = openAPI.getPaths().get("/events/stream").getGet();
-        CodegenOperation co = codegen.fromOperation("/events/stream", "get", streamOp, null);
+        Operation streamOp = openAPI.getPaths().get("/warn/stream").getGet();
+        CodegenOperation co = codegen.fromOperation("/warn/stream", "get", streamOp, null);
 
         listAppender.stop();
         testLogger.detachAppender(listAppender);
 
         assertNull(co.returnType, "itemSchema-only response must not produce a return type yet");
         CodegenResponse r = co.responses.get(0);
-        CodegenMediaType jsonl = r.getContent().get("application/jsonl");
-        assertNotNull(jsonl);
-        assertNull(jsonl.getSchema());
-        assertNotNull(jsonl.getItemSchema());
-        assertEquals("Event", jsonl.getItemSchema().dataType);
+        CodegenMediaType streamMt = r.getContent().get("application/x-test-stream");
+        assertNotNull(streamMt);
+        assertNull(streamMt.getSchema());
+        assertNotNull(streamMt.getItemSchema());
+        assertEquals("WarnEvent", streamMt.getItemSchema().dataType);
 
         List<ILoggingEvent> logsList = new ArrayList<>(listAppender.list).stream()
                 .filter(log -> Objects.equals(log.getThreadName(), Thread.currentThread().getName()))
                 .collect(Collectors.toList());
         assertTrue(logsList.stream().anyMatch(log -> log.getLevel() == Level.WARN
-                        && log.getFormattedMessage().contains("application/jsonl")
+                        && log.getFormattedMessage().contains("application/x-test-stream")
                         && log.getFormattedMessage().contains("itemSchema")),
                 "expected a warning naming the itemSchema-only media type, got: " + logsList);
     }
@@ -3063,12 +3065,13 @@ public class DefaultCodegenTest {
         listAppender.start();
         testLogger.addAppender(listAppender);
 
-        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        // dedicated fixture: see itemSchemaOnlyResponseWarnsAndCarriesItemSchema
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema-warn.yaml");
         final DefaultCodegen codegen = new DefaultCodegen();
         codegen.setOpenAPI(openAPI);
 
-        Operation streamOp = openAPI.getPaths().get("/events/ndjson").getGet();
-        codegen.fromOperation("/events/ndjson", "get", streamOp, null);
+        Operation streamOp = openAPI.getPaths().get("/warn/ndjson").getGet();
+        codegen.fromOperation("/warn/ndjson", "get", streamOp, null);
 
         listAppender.stop();
         testLogger.detachAppender(listAppender);
@@ -3076,7 +3079,7 @@ public class DefaultCodegenTest {
         long warnCount = new ArrayList<>(listAppender.list).stream()
                 .filter(log -> Objects.equals(log.getThreadName(), Thread.currentThread().getName()))
                 .filter(log -> log.getLevel() == Level.WARN
-                        && log.getFormattedMessage().contains("application/x-ndjson"))
+                        && log.getFormattedMessage().contains("application/x-test-ndjson"))
                 .count();
         assertEquals(1, warnCount, "expected exactly one warning naming the itemSchema-only media type");
     }

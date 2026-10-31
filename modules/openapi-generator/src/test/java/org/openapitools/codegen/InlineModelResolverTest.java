@@ -1869,4 +1869,30 @@ public class InlineModelResolverTest {
         assertRewritten("encoding headers", response.getContent().get("application/json")
                 .getEncoding().get("ok").getHeaders().get("X-Encoding").getSchema());
     }
+
+    @Test
+    public void testStreamOnlyOperationsSkippedWhenUnsupported() {
+        // OAS 3.2: an operation skipped downstream as stream-only needs no inline
+        // model extraction — with the default codegen (no streaming support) its
+        // inline itemSchema never becomes a component; with the capability declared
+        // it is flattened like any other schema
+        OpenAPI openAPI = TestUtils.parseSpec("src/test/resources/3_2/item-schema.yaml");
+        InlineModelResolver resolver = new InlineModelResolver();
+        resolver.setCodegen(new DefaultCodegen());
+        resolver.flatten(openAPI);
+        assertNull(openAPI.getComponents().getSchemas()
+                .get("streamEventsInline_200_response_item_schema"));
+
+        OpenAPI supportedSpec = TestUtils.parseSpec("src/test/resources/3_2/item-schema.yaml");
+        InlineModelResolver supportedResolver = new InlineModelResolver();
+        supportedResolver.setCodegen(new DefaultCodegen() {
+            @Override
+            public boolean supportsStreamingResponses() {
+                return true;
+            }
+        });
+        supportedResolver.flatten(supportedSpec);
+        assertNotNull(supportedSpec.getComponents().getSchemas()
+                .get("streamEventsInline_200_response_item_schema"));
+    }
 }

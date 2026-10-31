@@ -1427,4 +1427,57 @@ public class ModelUtilsTest {
         return schema;
     }
 
+    @Test
+    public void streamOnlyMediaTypesReflectsContentShape() {
+        // OAS 3.2: media type names are returned in declaration order only when every
+        // entry is sequential — a regular 'schema' anywhere is a usable fallback and
+        // turns the whole section non-stream-only
+        Content streamOnly = new Content()
+                .addMediaType("application/jsonl", new MediaType().itemSchema(new ObjectSchema()))
+                .addMediaType("text/event-stream", new MediaType().itemSchema(new StringSchema()));
+        assertEquals(ModelUtils.streamOnlyMediaTypes(streamOnly),
+                Arrays.asList("application/jsonl", "text/event-stream"));
+
+        Content withFallback = new Content()
+                .addMediaType("application/jsonl", new MediaType().itemSchema(new ObjectSchema()))
+                .addMediaType("application/json", new MediaType().schema(new ObjectSchema()));
+        assertTrue(ModelUtils.streamOnlyMediaTypes(withFallback).isEmpty(),
+                "a regular-schema media type is a fallback, not stream-only");
+
+        assertTrue(ModelUtils.streamOnlyMediaTypes(null).isEmpty());
+        assertTrue(ModelUtils.streamOnlyMediaTypes(new Content()).isEmpty());
+        Content plain = new Content()
+                .addMediaType("application/json", new MediaType().schema(new ObjectSchema()));
+        assertTrue(ModelUtils.streamOnlyMediaTypes(plain).isEmpty());
+        Content schemaAndItem = new Content()
+                .addMediaType("application/jsonl", new MediaType()
+                        .schema(new ObjectSchema()).itemSchema(new ObjectSchema()));
+        assertTrue(ModelUtils.streamOnlyMediaTypes(schemaAndItem).isEmpty(),
+                "a media type declaring both 'schema' and 'itemSchema' is not sequential-only");
+    }
+
+    @Test
+    public void streamOnlyWrappersResolveReferencesAndMethodResponse() {
+        // the request/response wrappers resolve $ref indirection and pick the method
+        // response the same way DefaultCodegen.findMethodResponse does (lowest 2xx,
+        // or 'default' when no 2xx exists)
+        OpenAPI openAPI = TestUtils.parseSpec("src/test/resources/3_2/item-schema.yaml");
+
+        io.swagger.v3.oas.models.Operation upload = openAPI.getPaths()
+                .get("/events/upload-stream").getPost();
+        assertEquals(ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, upload),
+                List.of("application/jsonl"));
+
+        io.swagger.v3.oas.models.Operation stream = openAPI.getPaths()
+                .get("/events/stream").getGet();
+        assertEquals(ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, stream),
+                List.of("application/jsonl"));
+        assertTrue(ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, stream).isEmpty(),
+                "no request body at all is not stream-only");
+
+        io.swagger.v3.oas.models.Operation list = openAPI.getPaths().get("/events").getGet();
+        assertTrue(ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, list).isEmpty(),
+                "the regular-schema fallback keeps the operation ordinary");
+    }
+
 }

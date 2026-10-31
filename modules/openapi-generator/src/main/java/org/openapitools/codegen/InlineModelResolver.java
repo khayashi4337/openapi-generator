@@ -286,16 +286,44 @@ public class InlineModelResolver {
 
     private void addOperationEntries(List<Map.Entry<String, Operation>> entries, PathItem pathItem) {
         boolean supports32Ops = codegen == null || codegen.supportsAdditionalOperations();
+        boolean supportsStreaming = codegen == null || codegen.supportsStreamingResponses();
         pathItem.readOperationsMap().forEach((method, operation) -> {
             if (method == PathItem.HttpMethod.QUERY && !supports32Ops) {
+                return;
+            }
+            // OAS 3.2: operations skipped downstream as stream-only (itemSchema-only
+            // request body — always, or itemSchema-only method response — unless the
+            // generator supports streaming) need no inline model extraction
+            if (isSkippedStreamingOperation(operation, supportsStreaming)) {
                 return;
             }
             entries.add(new AbstractMap.SimpleEntry<>(method.toString().toLowerCase(Locale.ROOT), operation));
         });
         if (supports32Ops && pathItem.getAdditionalOperations() != null) {
-            pathItem.getAdditionalOperations().forEach((method, operation) ->
-                    entries.add(new AbstractMap.SimpleEntry<>(method, operation)));
+            pathItem.getAdditionalOperations().forEach((method, operation) -> {
+                if (isSkippedStreamingOperation(operation, supportsStreaming)) {
+                    return;
+                }
+                entries.add(new AbstractMap.SimpleEntry<>(method, operation));
+            });
         }
+    }
+
+    /**
+     * Whether the operation will be skipped downstream because it is carried only by
+     * OAS 3.2 sequential media types ({@code itemSchema}): always when its request
+     * body is stream-only, and when its method response is stream-only unless the
+     * generator supports streaming responses.
+     */
+    private boolean isSkippedStreamingOperation(Operation operation, boolean supportsStreamingResponses) {
+        if (openAPI == null || operation == null) {
+            return false;
+        }
+        if (!ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, operation).isEmpty()) {
+            return true;
+        }
+        return !supportsStreamingResponses
+                && !ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, operation).isEmpty();
     }
 
     private String getInlineSchemaName(String httpVerb, String pathname) {

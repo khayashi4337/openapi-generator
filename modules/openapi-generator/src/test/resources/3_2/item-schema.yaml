@@ -131,6 +131,45 @@ paths:
               itemSchema:
                 oneOf:
                   - $ref: '#/components/schemas/Event'
+  /events/inline-stream:
+    get:
+      operationId: streamEventsInline
+      responses:
+        '200':
+          description: stream-only response carrying an inline item schema
+          content:
+            application/jsonl:
+              itemSchema:
+                type: object
+                properties:
+                  seq:
+                    type: integer
+  /events/upload-stream:
+    post:
+      operationId: uploadEventStream
+      description: stream-only request body - skipped for every generator
+      requestBody:
+        $ref: '#/components/requestBodies/EventStreamBody'
+      responses:
+        '204':
+          description: accepted
+  /events/subscribe:
+    post:
+      operationId: subscribeEvents
+      callbacks:
+        onData:
+          '{$request.body#/callbackUrl}':
+            post:
+              responses:
+                '200':
+                  description: pushed events
+                  content:
+                    text/event-stream:
+                      itemSchema:
+                        $ref: '#/components/schemas/Event'
+      responses:
+        '202':
+          description: subscribed
   /events/both-inline:
     get:
       operationId: getBothInline
@@ -155,7 +194,24 @@ paths:
                     type: string
                   ts:
                     type: integer
+webhooks:
+  newEvents:
+    post:
+      operationId: newEventsWebhook
+      responses:
+        '200':
+          description: pushed events
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
 components:
+  requestBodies:
+    EventStreamBody:
+      content:
+        application/jsonl:
+          itemSchema:
+            $ref: '#/components/schemas/Event'
   schemas:
     Event:
       type: object

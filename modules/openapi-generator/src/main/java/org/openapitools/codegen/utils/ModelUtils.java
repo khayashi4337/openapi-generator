@@ -1627,6 +1627,84 @@ public class ModelUtils {
     }
 
     /**
+     * The names of the media types carrying {@code itemSchema} in {@code content}, in
+     * declaration order, when the content is "stream-only" — at least one media type
+     * declares {@code itemSchema} (OAS 3.2 sequential media types) and none declares a
+     * regular {@code schema}, so there is no fallback schema code generation can type
+     * the payload by. Returns an empty list when the content is null, declares no
+     * {@code itemSchema}, or still has a regular-{@code schema} fallback.
+     *
+     * @param content a 'content' section in the OAS specification
+     * @return the sequential media type names, or an empty list when not stream-only
+     */
+    public static List<String> streamOnlyMediaTypes(Content content) {
+        if (content == null || !hasItemSchema(content)) {
+            return Collections.emptyList();
+        }
+        List<String> mediaTypes = new ArrayList<>();
+        for (Map.Entry<String, MediaType> entry : content.entrySet()) {
+            MediaType mediaType = entry.getValue();
+            if (mediaType == null) {
+                continue;
+            }
+            if (mediaType.getSchema() != null) {
+                // a regular-schema fallback exists — the content is not stream-only
+                return Collections.emptyList();
+            }
+            if (mediaType.getItemSchema() != null) {
+                mediaTypes.add(entry.getKey());
+            }
+        }
+        return mediaTypes;
+    }
+
+    /**
+     * {@link #streamOnlyMediaTypes(Content)} applied to the operation's "method
+     * response" — the response its return type is derived from (the lowest 2xx code,
+     * or {@code "default"} when no 2xx exists), the same selection
+     * {@code DefaultCodegen.findMethodResponse} makes.
+     *
+     * @param openAPI   current specification instance, used to resolve {@code $ref}s
+     * @param operation the operation
+     * @return the sequential media type names of a stream-only method response, or empty
+     */
+    public static List<String> streamOnlyMethodResponseMediaTypes(OpenAPI openAPI, Operation operation) {
+        if (operation == null || operation.getResponses() == null || operation.getResponses().isEmpty()) {
+            return Collections.emptyList();
+        }
+        String code = null;
+        for (String responseCode : operation.getResponses().keySet()) {
+            if (responseCode.startsWith("2") || responseCode.equals("default")) {
+                if (code == null || code.compareTo(responseCode) > 0) {
+                    code = responseCode;
+                }
+            }
+        }
+        if (code == null) {
+            return Collections.emptyList();
+        }
+        ApiResponse response = getReferencedApiResponse(openAPI, operation.getResponses().get(code));
+        return streamOnlyMediaTypes(response == null ? null : response.getContent());
+    }
+
+    /**
+     * {@link #streamOnlyMediaTypes(Content)} applied to the operation's request body
+     * ({@code $ref}s resolved). A stream-only request body is skipped unconditionally:
+     * no generator can serialize an outbound sequential stream yet.
+     *
+     * @param openAPI   current specification instance, used to resolve {@code $ref}s
+     * @param operation the operation
+     * @return the sequential media type names of a stream-only request body, or empty
+     */
+    public static List<String> streamOnlyRequestBodyMediaTypes(OpenAPI openAPI, Operation operation) {
+        if (operation == null) {
+            return Collections.emptyList();
+        }
+        RequestBody requestBody = getReferencedRequestBody(openAPI, operation.getRequestBody());
+        return streamOnlyMediaTypes(requestBody == null ? null : requestBody.getContent());
+    }
+
+    /**
      * Has self reference?
      *
      * @param openAPI OpenAPI spec.

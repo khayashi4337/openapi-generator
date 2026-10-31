@@ -1444,6 +1444,15 @@ public class DefaultCodegen implements CodegenConfig {
                         pathOperations.putAll(e.getValue().getAdditionalOperations());
                     }
                     for (Map.Entry<String, Operation> op : pathOperations.entrySet()) {
+                        // OAS 3.2: operations skipped downstream as stream-only
+                        // (itemSchema-only request body — always, or itemSchema-only
+                        // method response — unless streaming is supported) contribute
+                        // no schemas here either
+                        if (!ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, op.getValue()).isEmpty()
+                                || (!supportsStreamingResponses()
+                                    && !ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, op.getValue()).isEmpty())) {
+                            continue;
+                        }
                         String opId = getOrGenerateOperationId(op.getValue(), e.getKey(), op.getKey());
                         // process request body
                         RequestBody b = ModelUtils.getReferencedRequestBody(openAPI, op.getValue().getRequestBody());
@@ -4994,6 +5003,7 @@ public class DefaultCodegen implements CodegenConfig {
 
         if (operation.getResponses() != null && !operation.getResponses().isEmpty()) {
             ApiResponse methodResponse = findMethodResponse(operation.getResponses());
+            String methodResponseCode = findMethodResponseCode(operation.getResponses());
             // a content-type variant produces only what its method response, the one the split narrowed,
             // declares (see getProducesInfo)
             boolean producesNarrowed = contentTypeVariantMediaType(operation, CodegenConstants.X_CONTENT_TYPE_VARIANT_RESPONSE) != null;
@@ -5020,6 +5030,17 @@ public class DefaultCodegen implements CodegenConfig {
                 }
                 String mediaTypeSchemaSuffix = String.format(Locale.ROOT, "%sResponseBody", r.code);
                 r.setContent(getContent(response.getContent(), imports, mediaTypeSchemaSuffix));
+
+                // OAS 3.2: when the method response is carried only by sequential media
+                // types (itemSchema), mark the operation so generators declaring
+                // supportsStreamingResponses() can emit a sequential API; generators
+                // without the capability skip such operations upstream
+                if (key.equals(methodResponseCode)) {
+                    List<String> streamMediaTypes = ModelUtils.streamOnlyMediaTypes(response.getContent());
+                    if (!streamMediaTypes.isEmpty()) {
+                        markStreamingOperation(op, r, streamMediaTypes.get(0));
+                    }
+                }
 
                 if (r.baseType != null &&
                         !defaultIncludes.contains(r.baseType) &&
@@ -5566,6 +5587,24 @@ public class DefaultCodegen implements CodegenConfig {
                             LOGGER.info("Operation ({} {} - {}) not generated since x-internal is set to true",
                                     method, expression, op.getOperationId());
                         } else {
+                            // OAS 3.2 sequential media types (itemSchema): a callback
+                            // request body carried only by a stream cannot be serialized
+                            // yet — skipped unconditionally
+                            List<String> streamOnlyBodyMediaTypes = ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, op);
+                            if (!streamOnlyBodyMediaTypes.isEmpty()) {
+                                LOGGER.warn("Callback operation ({} on expression '{}') declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
+                                        method, expression, streamOnlyBodyMediaTypes);
+                                return;
+                            }
+                            if (!supportsStreamingResponses()) {
+                                List<String> streamOnlyMediaTypes = ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, op);
+                                if (!streamOnlyMediaTypes.isEmpty()) {
+                                    LOGGER.warn("Callback operation ({} on expression '{}') returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
+                                            method, expression, streamOnlyMediaTypes, getName());
+                                    return;
+                                }
+                            }
+
                             boolean genId = op.getOperationId() == null;
                             if (genId) {
                                 op.setOperationId(getOrGenerateOperationId(op, c.name + "_" + expression.replaceAll("\\{\\$.*}", ""), method));
@@ -7899,6 +7938,52 @@ public class DefaultCodegen implements CodegenConfig {
             }
         }
         return false;
+    }
+
+    /**
+     * Marks an operation whose method response is carried only by sequential media types
+     * (OAS 3.2 {@code itemSchema}) with the streaming markers a generator declaring
+     * {@link CodegenConfig#supportsStreamingResponses()} reads to emit a sequential API.
+     * The response's return type stays as resolved — {@code void} today — until a
+     * language-level streaming implementation maps {@code streamingItemType}.
+     *
+     * @param op        the codegen operation to mark
+     * @param response  the codegen response built for the method response
+     * @param mediaType the first sequential media type name in the response content
+     */
+    private void markStreamingOperation(CodegenOperation op, CodegenResponse response, String mediaType) {
+        op.isStreamingResponse = true;
+        op.streamingMediaType = mediaType;
+        op.streamingFormat = streamingFormatOf(mediaType);
+        if (response.getContent() != null) {
+            CodegenMediaType mt = response.getContent().get(mediaType);
+            if (mt != null) {
+                op.streamingItemType = mt.getItemSchema();
+            }
+        }
+    }
+
+    /**
+     * The wire format family of a sequential media type: {@code jsonl} for
+     * {@code application/jsonl} and {@code application/x-ndjson}, {@code json-seq} for
+     * {@code application/json-seq}, {@code sse} for {@code text/event-stream}, and
+     * {@code other} otherwise.
+     */
+    private static String streamingFormatOf(String mediaType) {
+        if (mediaType == null) {
+            return "other";
+        }
+        switch (mediaType.split(";")[0].trim().toLowerCase(Locale.ROOT)) {
+            case "application/jsonl":
+            case "application/x-ndjson":
+                return "jsonl";
+            case "application/json-seq":
+                return "json-seq";
+            case "text/event-stream":
+                return "sse";
+            default:
+                return "other";
+        }
     }
 
     protected String getCollectionFormat(Parameter parameter) {

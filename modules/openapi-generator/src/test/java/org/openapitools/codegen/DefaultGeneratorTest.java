@@ -19,6 +19,12 @@ import org.openapitools.codegen.utils.ModelUtils;
 import org.testng.Assert;
 import org.testng.annotations.Test;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.slf4j.LoggerFactory;
+
 import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
@@ -543,6 +550,170 @@ public class DefaultGeneratorTest {
         Assert.assertEquals(ops.get(0).httpMethod, "QUERY");
         Assert.assertEquals(ops.get(1).operationId, "customHook");
         Assert.assertEquals(ops.get(1).httpMethod, "RETRY");
+    }
+
+    @Test
+    public void testStreamOnlyOperationsSkippedWithWarningWhenUnsupported() throws Exception {
+        // OAS 3.2: an operation carried only by sequential media types (itemSchema)
+        // is skipped with one warning each for generators without
+        // supportsStreamingResponses(); operations that keep a regular-schema
+        // fallback are generated as before
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        Logger generatorLogger = (Logger) LoggerFactory.getLogger(DefaultGenerator.class);
+        generatorLogger.addAppender(listAppender);
+
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        listAppender.stop();
+        generatorLogger.detachAppender(listAppender);
+
+        Set<String> operationIds = result.values().stream().flatMap(List::stream)
+                .map(o -> o.operationId).collect(Collectors.toSet());
+        for (String skipped : Arrays.asList("streamEvents", "streamEventsNdjson",
+                "streamEventsNormalized", "streamEventsInline", "uploadEventStream")) {
+            Assert.assertFalse(operationIds.contains(skipped),
+                    skipped + " must be skipped for a generator without streaming support");
+        }
+        for (String kept : Arrays.asList("listEvents", "getEventBatch", "listEventsFiltered",
+                "uploadEvents", "subscribeEvents", "getBothInline")) {
+            Assert.assertTrue(operationIds.contains(kept),
+                    kept + " keeps a regular-schema fallback and must be generated");
+        }
+
+        List<ILoggingEvent> warnings = listAppender.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN
+                        && e.getFormattedMessage().contains("sequential media types"))
+                .collect(Collectors.toList());
+        Assert.assertEquals(warnings.size(), 5, "expected one warning per skipped operation");
+        Assert.assertTrue(warnings.stream().anyMatch(e -> e.getFormattedMessage().contains("GET /events/stream")
+                && e.getFormattedMessage().contains("application/jsonl")));
+        Assert.assertTrue(warnings.stream().anyMatch(e -> e.getFormattedMessage().contains("GET /events/ndjson")
+                && e.getFormattedMessage().contains("application/x-ndjson")));
+        Assert.assertTrue(warnings.stream().anyMatch(e -> e.getFormattedMessage().contains("POST /events/upload-stream")
+                && e.getFormattedMessage().contains("request body")));
+    }
+
+    @Test
+    public void testStreamOnlyOperationsGeneratedWithMarkersWhenSupported() throws Exception {
+        // a generator declaring supportsStreamingResponses() still generates
+        // stream-only operations, marked so its templates can emit a sequential API
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        DefaultCodegen codegen = new DefaultCodegen() {
+            @Override
+            public boolean supportsStreamingResponses() {
+                return true;
+            }
+        };
+        codegen.setOpenAPI(openAPI);
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> result = generator.processPaths(openAPI.getPaths());
+
+        Map<String, CodegenOperation> byId = result.values().stream().flatMap(List::stream)
+                .collect(Collectors.toMap(o -> o.operationId, o -> o));
+        Assert.assertTrue(byId.keySet().containsAll(Arrays.asList(
+                "streamEvents", "streamEventsNdjson", "streamEventsNormalized", "streamEventsInline")));
+        // a stream-only request body is skipped even when the generator supports streaming
+        Assert.assertFalse(byId.containsKey("uploadEventStream"));
+
+        CodegenOperation stream = byId.get("streamEvents");
+        Assert.assertTrue(stream.isStreamingResponse);
+        Assert.assertEquals(stream.streamingMediaType, "application/jsonl");
+        Assert.assertEquals(stream.streamingFormat, "jsonl");
+        Assert.assertNotNull(stream.streamingItemType);
+        Assert.assertEquals(stream.streamingItemType.dataType, "Event");
+        Assert.assertNull(stream.returnType,
+                "the fallback return type stays void until a language maps streamingItemType");
+
+        CodegenOperation ndjson = byId.get("streamEventsNdjson");
+        Assert.assertTrue(ndjson.isStreamingResponse);
+        Assert.assertEquals(ndjson.streamingMediaType, "application/x-ndjson");
+        Assert.assertEquals(ndjson.streamingFormat, "jsonl");
+        Assert.assertNotNull(ndjson.streamingItemType);
+        Assert.assertEquals(ndjson.streamingItemType.dataType, "Ping");
+
+        CodegenOperation normalized = byId.get("streamEventsNormalized");
+        Assert.assertTrue(normalized.isStreamingResponse);
+        Assert.assertEquals(normalized.streamingMediaType, "application/json-seq");
+        Assert.assertEquals(normalized.streamingFormat, "json-seq");
+    }
+
+    @Test
+    public void testStreamOnlyCallbackAndWebhookSkippedUnlessSupported() throws Exception {
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+
+        // default generator: the stream-only callback operation and the stream-only
+        // webhook are skipped
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        Logger codegenLogger = (Logger) LoggerFactory.getLogger(DefaultCodegen.class);
+        codegenLogger.addAppender(listAppender);
+
+        DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+        CodegenOperation co = codegen.fromOperation("/events/subscribe", "post",
+                openAPI.getPaths().get("/events/subscribe").getPost(), null);
+        Assert.assertEquals(co.callbacks.size(), 1);
+        Assert.assertTrue(co.callbacks.get(0).urls.get(0).requests.isEmpty(),
+                "a callback operation returning only a stream must be skipped");
+
+        listAppender.stop();
+        codegenLogger.detachAppender(listAppender);
+        Assert.assertEquals(listAppender.list.stream()
+                .filter(e -> e.getLevel() == Level.WARN
+                        && e.getFormattedMessage().contains("sequential media types"))
+                .count(), 1, "expected one warning for the skipped callback operation");
+
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        opts.config(codegen);
+        DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> webhooks = generator.processWebhooks(openAPI.getWebhooks());
+        Assert.assertTrue(webhooks.values().stream().flatMap(List::stream)
+                .noneMatch(o -> "newEventsWebhook".equals(o.operationId)));
+
+        // a generator declaring supportsStreamingResponses() generates both, marked
+        DefaultCodegen streaming = new DefaultCodegen() {
+            @Override
+            public boolean supportsStreamingResponses() {
+                return true;
+            }
+        };
+        streaming.setOpenAPI(openAPI);
+        CodegenOperation supported = streaming.fromOperation("/events/subscribe", "post",
+                openAPI.getPaths().get("/events/subscribe").getPost(), null);
+        List<CodegenOperation> callbackRequests = supported.callbacks.get(0).urls.get(0).requests;
+        Assert.assertEquals(callbackRequests.size(), 1);
+        Assert.assertTrue(callbackRequests.get(0).isStreamingResponse);
+        Assert.assertEquals(callbackRequests.get(0).streamingMediaType, "text/event-stream");
+        Assert.assertEquals(callbackRequests.get(0).streamingFormat, "sse");
+
+        opts.config(streaming);
+        generator.opts(opts);
+        Map<String, List<CodegenOperation>> supportedWebhooks = generator.processWebhooks(openAPI.getWebhooks());
+        CodegenOperation webhook = supportedWebhooks.values().stream().flatMap(List::stream)
+                .filter(o -> "newEventsWebhook".equals(o.operationId)).findFirst().orElse(null);
+        Assert.assertNotNull(webhook);
+        Assert.assertTrue(webhook.isStreamingResponse);
+        Assert.assertEquals(webhook.streamingMediaType, "text/event-stream");
+        Assert.assertEquals(webhook.streamingFormat, "sse");
+        Assert.assertNotNull(webhook.streamingItemType);
+        Assert.assertEquals(webhook.streamingItemType.dataType, "Event");
     }
 
     @Test

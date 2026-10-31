@@ -425,4 +425,19 @@ public interface CodegenConfig {
         return false;
     }
 
+    /**
+     * Whether this generator can emit a sequential/streaming API for operations whose
+     * success response is carried only by OpenAPI 3.2 sequential media types — media
+     * types declaring {@code itemSchema} (e.g. {@code text/event-stream},
+     * {@code application/jsonl}) and no regular {@code schema}. Generators without a
+     * streaming surface must keep the default {@code false}: such stream-only
+     * operations are then skipped with a warning instead of producing an operation
+     * that silently drops all response data.
+     *
+     * @return true if the generator supports OpenAPI 3.2 streaming responses
+     */
+    default boolean supportsStreamingResponses() {
+        return false;
+    }
+
 }

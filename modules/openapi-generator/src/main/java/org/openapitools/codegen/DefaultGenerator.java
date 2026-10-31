@@ -1589,6 +1589,25 @@ public class DefaultGenerator implements Generator {
             return;
         }
 
+        // OAS 3.2 sequential media types (itemSchema): a request body carried only by a
+        // stream cannot be serialized by any generator yet — skipped unconditionally
+        List<String> streamOnlyBodyMediaTypes = ModelUtils.streamOnlyRequestBodyMediaTypes(openAPI, operation);
+        if (!streamOnlyBodyMediaTypes.isEmpty()) {
+            LOGGER.warn("{} {} declares a request body only through OpenAPI 3.2 sequential media types {} ('itemSchema'), for which request-side streaming is not supported; the operation will be missing from the generated output",
+                    httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyBodyMediaTypes);
+            return;
+        }
+        // a success response carried only by a stream degrades to a silent void when the
+        // generator has no streaming surface — skipped unless it declares the capability
+        if (!config.supportsStreamingResponses()) {
+            List<String> streamOnlyMediaTypes = ModelUtils.streamOnlyMethodResponseMediaTypes(openAPI, operation);
+            if (!streamOnlyMediaTypes.isEmpty()) {
+                LOGGER.warn("{} {} returns data only through OpenAPI 3.2 sequential media types {} ('itemSchema') but generator '{}' does not support streaming responses; the operation will be missing from the generated output",
+                        httpMethod.toUpperCase(Locale.ROOT), resourcePath, streamOnlyMediaTypes, config.getName());
+                return;
+            }
+        }
+
         // splitOperationsByContentType: an operation that exposes several content-types with different
         // schemas is divided into one self-contained single-content-type Operation per content-type, each
         // re-entering the pipeline so it is typed natively by the generator.

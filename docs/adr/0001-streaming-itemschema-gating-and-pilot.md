@@ -212,11 +212,23 @@ JS/TSの`ReadableStream`/`AsyncIterable`はストリーミングとの適合度�
    (重複排除後の$ref書き換え)、`getContentType`/`addConsumesInfo`/`getConsumesInfo`/
    `addProducesInfo`/`getProducesInfo`（送受信 media type を選択 schema と一致させる
    フォールバック = ストリーム対応前の中間状態）も itemSchema 対応済み
-3. [ ] `CodegenConfig.supportsStreamingResponses()` capability追加（default false）。
+3. [x] `CodegenConfig.supportsStreamingResponses()` capability追加（default false）。
    判定はmedia type単位（Decision参照）
-4. [ ] `DefaultCodegen.fromResponse`/`handleMethodResponse`/`fromRequestBody`に、
+   → 実施済。`CodegenConfig` に default false で追加。stream-only 判定は
+   `ModelUtils.streamOnlyMediaTypes`/`streamOnlyMethodResponseMediaTypes`/
+   `streamOnlyRequestBodyMediaTypes` に集約し、`DefaultGenerator.processOperation`
+   （paths/webhooks/additional operations/variants の合流点）、
+   `DefaultCodegen.fromCallback`、`preprocessOpenAPI`、
+   `InlineModelResolver.addOperationEntries` の各経路で同一判定を適用
+   （MergedSpecBuilder は spec マージ層で capability を持たず、下流に委譲）
+4. [~] `DefaultCodegen.fromResponse`/`handleMethodResponse`/`fromRequestBody`に、
    (a)対応時は型付き逐次APIを生成 (b)非対応時は代替schemaへフォールバック、無ければwarn+skip
    (c)raw公開・全件バッファリングは明示オプション、のロジックを実装
+   → (b) 実施済: 代替 schema があれば従来どおり生成、無ければ warn+skip
+   （request body の stream-only は capability にかかわらず warn+skip）。
+   (a) は `CodegenOperation` の印（`isStreamingResponse`/`streamingMediaType`/
+   `streamingFormat`/`streamingItemType`）まで。言語別の逐次API生成は item 6 以降。
+   (c) は未実施（将来の明示オプションとして残す）
 5. [ ] swagger-parser側の`ResponseProcessor`等が`itemSchema`内の外部`$ref`を解決していない
    問題を確認・必要なら上流フォークに修正を依頼（Fable指摘、Verified by grep）
 6. [ ] Pythonでnative実装のプロトタイプ（JSONLを先に、次にSSEパーサ + 新規ワイヤー検証ハーネス）

@@ -1,0 +1,35 @@
+openapi: 3.2.0
+info:
+  title: itemSchema warning fixture
+  version: 1.0.0
+  description: dedicated fixture for warning tests; the media type names are unique
+    so OnceLogger's JVM-wide message deduplication cannot be poisoned by other
+    tests exercising the same media types
+paths:
+  /warn/stream:
+    get:
+      operationId: warnStream
+      responses:
+        '200':
+          description: stream-only response
+          content:
+            application/x-test-stream:
+              itemSchema:
+                $ref: '#/components/schemas/WarnEvent'
+  /warn/ndjson:
+    get:
+      operationId: warnNdjson
+      responses:
+        '200':
+          description: stream-only response
+          content:
+            application/x-test-ndjson:
+              itemSchema:
+                $ref: '#/components/schemas/WarnEvent'
+components:
+  schemas:
+    WarnEvent:
+      type: object
+      properties:
+        id:
+          type: string
