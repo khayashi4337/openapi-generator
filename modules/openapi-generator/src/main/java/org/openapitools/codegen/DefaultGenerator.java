@@ -103,9 +103,6 @@ public class DefaultGenerator implements Generator {
     private final String generatorCheck = "spring";
     private final String templateCheck = "apiController.mustache";
 
-    private Map<String, List<String>> tagAncestorChains;
-    private OpenAPI tagAncestorChainsSource;
-
 
     public DefaultGenerator() {
         this(false);
@@ -690,67 +687,115 @@ public class DefaultGenerator implements Generator {
     }
 
     /**
-     * Lazily builds the ancestor chain of every tag declared in {@link OpenAPI#getTags()} once per
-     * parsed spec. The chain lists ancestor tag names ordered from the root down to the direct
-     * parent, so its last element is the resolved {@code parent} of the tag. A {@code parent}
-     * naming a tag that does not exist is logged once and the tag is treated as having no parent;
-     * a circular reference is logged once and the chain is truncated before entering the cycle.
+     * Groups the declared tags by the API group name they produce —
+     * {@link CodegenConfig#sanitizeTag(String)} applied to each tag {@code name} — keeping
+     * declaration order inside each group. Several declared tags can share one group name
+     * (e.g. {@code pet-store} and {@code PetStore} both sanitize to {@code PetStore}).
      *
-     * @return map of declared tag name to its ordered ancestor tag names (possibly empty lists)
+     * @param tags declared tags ({@link OpenAPI#getTags()}), may be {@code null}
+     * @return map of group name to declared tags in declaration order
      */
-    private Map<String, List<String>> resolveTagAncestorChains() {
-        if (tagAncestorChains == null || tagAncestorChainsSource != openAPI) {
-            tagAncestorChainsSource = openAPI;
-            tagAncestorChains = buildTagAncestorChains();
+    private Map<String, List<Tag>> buildTagsByGroupName(List<Tag> tags) {
+        Map<String, List<Tag>> tagsByGroupName = new LinkedHashMap<>();
+        if (tags != null) {
+            for (Tag tag : tags) {
+                if (tag.getName() != null) {
+                    tagsByGroupName.computeIfAbsent(config.sanitizeTag(tag.getName()), k -> new ArrayList<>()).add(tag);
+                }
+            }
         }
-        return tagAncestorChains;
+        return tagsByGroupName;
     }
 
-    private Map<String, List<String>> buildTagAncestorChains() {
+    /**
+     * Resolves the declared {@link Tag} behind an operation group name produced by
+     * {@link CodegenConfig#sanitizeTag(String)}. Matching goes through the sanitized form, so a
+     * declared tag whose name was rewritten is still found (e.g. declared {@code pet-store}
+     * behind group {@code PetStore}). When several declared tags share the same group name, the
+     * one whose {@code name} appears first in the group's operations (scanned in operation order,
+     * then tag order within each operation) wins; if no operation names a declared tag, the first
+     * declared tag wins.
+     *
+     * @param groupName       group name (the sanitized tag name, same value as {@code baseName})
+     * @param ops             operations grouped under {@code groupName}
+     * @param tagsByGroupName declared tags by group name, from {@link #buildTagsByGroupName}
+     * @return the resolved declared tag, or {@code null} when no declared tag maps to the group
+     */
+    private Tag resolveGroupTag(String groupName, List<CodegenOperation> ops, Map<String, List<Tag>> tagsByGroupName) {
+        List<Tag> declared = tagsByGroupName.get(groupName);
+        if (declared == null || declared.isEmpty()) {
+            return null;
+        }
+        Map<String, Tag> byName = new HashMap<>();
+        for (Tag tag : declared) {
+            byName.put(tag.getName(), tag);
+        }
+        for (CodegenOperation op : ops) {
+            if (op.tags == null) {
+                continue;
+            }
+            for (Tag candidate : op.tags) {
+                Tag match = byName.get(candidate.getName());
+                if (match != null) {
+                    return match;
+                }
+            }
+        }
+        return declared.get(0);
+    }
+
+    /**
+     * Builds the ancestor chain of every tag declared in {@code tags} ({@link OpenAPI#getTags()}).
+     * Each chain lists ancestor tag names ordered from the root down to the direct parent, so its
+     * last element is the tag's resolved {@code parent}. Parent references are resolved against
+     * declared tag names with exact, case-sensitive equality — the OpenAPI 3.2 Tag Object defines
+     * {@code parent} as the name of a tag and specifies no case-insensitive matching. A
+     * {@code parent} naming a tag that does not exist is logged once per declaring tag and the tag
+     * is treated as having no parent. A circular reference is logged once per distinct cycle; the
+     * chain keeps every tag walked before the hop that would re-enter an already visited tag, so
+     * a tag on a path into a cycle keeps the cycle members it reached — e.g. {@code x -> a -> b -> a}
+     * gives {@code x} ancestors {@code [b, a]}.
+     *
+     * @param tags declared tags, may be {@code null}
+     * @return map of declared tag name to its ordered ancestor tag names (possibly empty lists)
+     */
+    private Map<String, List<String>> buildTagAncestorChains(List<Tag> tags) {
         Map<String, List<String>> chains = new HashMap<>();
-        List<Tag> swaggerTags = openAPI == null ? null : openAPI.getTags();
-        if (swaggerTags == null) {
+        if (tags == null) {
             return chains;
         }
-        Map<String, Tag> byName = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
-        for (Tag tag : swaggerTags) {
+        Map<String, Tag> byName = new HashMap<>();
+        for (Tag tag : tags) {
             if (tag.getName() != null) {
                 byName.putIfAbsent(tag.getName(), tag);
             }
         }
-        Set<String> warned = new HashSet<>();
-        for (Tag tag : swaggerTags) {
+        Set<String> warnedMissingParents = new HashSet<>();
+        Set<Set<String>> warnedCycles = new HashSet<>();
+        for (Tag tag : tags) {
             String name = tag.getName();
             if (name == null || chains.containsKey(name)) {
                 continue;
             }
             List<String> chain = new ArrayList<>();
             List<String> order = new ArrayList<>();
-            Set<String> seen = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+            Set<String> seen = new HashSet<>();
             seen.add(name);
             order.add(name);
             Tag current = tag;
             while (current.getParent() != null) {
                 Tag parent = byName.get(current.getParent());
                 if (parent == null) {
-                    if (warned.add("missing:" + current.getName())) {
+                    if (warnedMissingParents.add(current.getName())) {
                         LOGGER.warn("Tag '{}' declares parent '{}' which is not a defined tag; treating it as having no parent",
                                 current.getName(), current.getParent());
                     }
                     break;
                 }
                 if (!seen.add(parent.getName())) {
-                    int cycleStart = 0;
-                    for (int i = 0; i < order.size(); i++) {
-                        if (order.get(i).equalsIgnoreCase(parent.getName())) {
-                            cycleStart = i;
-                            break;
-                        }
-                    }
-                    Set<String> cycle = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-                    cycle.addAll(order.subList(cycleStart, order.size()));
-                    if (warned.add("cycle:" + String.join(",", cycle))) {
-                        LOGGER.warn("Circular tag parent reference detected at tag '{}'; ancestor chain truncated",
+                    Set<String> cycle = new TreeSet<>(order.subList(order.indexOf(parent.getName()), order.size()));
+                    if (warnedCycles.add(cycle)) {
+                        LOGGER.warn("Circular tag parent reference detected at tag '{}'; ancestor chain stops before re-entering it",
                                 parent.getName());
                     }
                     break;
@@ -763,6 +808,76 @@ public class DefaultGenerator implements Generator {
             chains.put(name, chain);
         }
         return chains;
+    }
+
+    /**
+     * Populates the {@code operationTag*} entries of an operation map for one tag group.
+     *
+     * <p>{@code operationTagName} and {@code operationTagDescription} keep their historical
+     * lookup — the group name compared case-insensitively against declared tag names — so
+     * existing output stays unchanged. The OpenAPI 3.2 metadata keys instead resolve the declared
+     * {@link Tag} through {@link #resolveGroupTag}, so they also reach groups whose name was
+     * rewritten by {@link CodegenConfig#sanitizeTag(String)} (e.g. declared {@code pet-store} in
+     * group {@code PetStore}):
+     * <ul>
+     *   <li>{@code operationTagSummary} / {@code operationTagKind}: escaped display values</li>
+     *   <li>{@code operationTagParent}: escaped display name of the resolved parent tag</li>
+     *   <li>{@code operationTagParentBaseName}: {@link CodegenConfig#sanitizeTag(String)} of the
+     *       parent name — the parent's group name in the same shape as {@code baseName}, so
+     *       templates can build links or class names pointing at the parent's API</li>
+     *   <li>{@code operationTagAncestors}: a list of {@code {name, baseName}} maps ordered from
+     *       the root to the direct parent; {@code name} is escaped for display, {@code baseName}
+     *       is the sanitized group-name form — usable as
+     *       {@code {{#operationTagAncestors}}{{name}} {{baseName}}{{/operationTagAncestors}}}</li>
+     * </ul>
+     * Absent values are simply not added.
+     *
+     * @param operation         operation map (apis or webhooks) to populate
+     * @param tag               group name (the sanitized tag name, same value as {@code baseName})
+     * @param ops               operations grouped under {@code tag}
+     * @param tagsByGroupName   declared tags by group name, from {@link #buildTagsByGroupName}
+     * @param tagAncestorChains ancestor chains, from {@link #buildTagAncestorChains}
+     */
+    private void putTagMetadata(Map<String, Object> operation, String tag, List<CodegenOperation> ops,
+                                Map<String, List<Tag>> tagsByGroupName, Map<String, List<String>> tagAncestorChains) {
+        Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                .map(Tag::getName)
+                .filter(Objects::nonNull)
+                .filter(tag::equalsIgnoreCase)
+                .findFirst()
+                .ifPresent(tagName -> operation.put("operationTagName", config.escapeText(tagName)));
+        operation.put("operationTagDescription", "");
+        Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
+                .filter(t -> tag.equalsIgnoreCase(t.getName()))
+                .map(Tag::getDescription)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .ifPresent(description -> operation.put("operationTagDescription", config.escapeText(description)));
+        Tag groupTag = resolveGroupTag(tag, ops, tagsByGroupName);
+        if (groupTag == null) {
+            return;
+        }
+        if (groupTag.getSummary() != null) {
+            operation.put("operationTagSummary", config.escapeText(groupTag.getSummary()));
+        }
+        if (groupTag.getKind() != null) {
+            operation.put("operationTagKind", config.escapeText(groupTag.getKind()));
+        }
+        List<String> ancestors = tagAncestorChains.get(groupTag.getName());
+        if (ancestors == null || ancestors.isEmpty()) {
+            return;
+        }
+        String parent = ancestors.get(ancestors.size() - 1);
+        operation.put("operationTagParent", config.escapeText(parent));
+        operation.put("operationTagParentBaseName", config.sanitizeTag(parent));
+        List<Map<String, String>> ancestorMaps = new ArrayList<>(ancestors.size());
+        for (String ancestor : ancestors) {
+            Map<String, String> entry = new HashMap<>(2);
+            entry.put("name", config.escapeText(ancestor));
+            entry.put("baseName", config.sanitizeTag(ancestor));
+            ancestorMaps.add(entry);
+        }
+        operation.put("operationTagAncestors", ancestorMaps);
     }
 
     void generateApis(List<File> files, List<OperationsMap> allOperations, List<ModelMap> allModels) {
@@ -782,6 +897,9 @@ public class DefaultGenerator implements Generator {
             }
             paths = updatedPaths;
         }
+        List<Tag> declaredTags = openAPI.getTags();
+        Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
+        Map<String, List<String>> tagAncestorChains = buildTagAncestorChains(declaredTags);
         for (String tag : paths.keySet()) {
             try {
                 List<CodegenOperation> ops = paths.get(tag);
@@ -795,44 +913,7 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .map(Tag::getName)
-                        .filter(Objects::nonNull)
-                        .filter(tag::equalsIgnoreCase)
-                        .findFirst()
-                        .ifPresent(tagName -> operation.put("operationTagName", config.escapeText(tagName)));
-                operation.put("operationTagDescription", "");
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getDescription)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(description -> operation.put("operationTagDescription", config.escapeText(description)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getSummary)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(summary -> operation.put("operationTagSummary", config.escapeText(summary)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getKind)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(kind -> operation.put("operationTagKind", config.escapeText(kind)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getName)
-                        .filter(Objects::nonNull)
-                        .map(resolveTagAncestorChains()::get)
-                        .filter(Objects::nonNull)
-                        .filter(ancestors -> !ancestors.isEmpty())
-                        .findFirst()
-                        .ifPresent(ancestors -> {
-                            operation.put("operationTagParent", config.escapeText(ancestors.get(ancestors.size() - 1)));
-                            operation.put("operationTagAncestors",
-                                    ancestors.stream().map(config::escapeText).collect(Collectors.toList()));
-                        });
+                putTagMetadata(operation, tag, ops, tagsByGroupName, tagAncestorChains);
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -969,6 +1050,9 @@ public class DefaultGenerator implements Generator {
             }
             webhooks = Webhooks;
         }
+        List<Tag> declaredTags = openAPI.getTags();
+        Map<String, List<Tag>> tagsByGroupName = buildTagsByGroupName(declaredTags);
+        Map<String, List<String>> tagAncestorChains = buildTagAncestorChains(declaredTags);
         for (String tag : webhooks.keySet()) {
             try {
                 List<CodegenOperation> wks = webhooks.get(tag);
@@ -979,44 +1063,7 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .map(Tag::getName)
-                        .filter(Objects::nonNull)
-                        .filter(tag::equalsIgnoreCase)
-                        .findFirst()
-                        .ifPresent(tagName -> operation.put("operationTagName", config.escapeText(tagName)));
-                operation.put("operationTagDescription", "");
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getDescription)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(description -> operation.put("operationTagDescription", config.escapeText(description)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getSummary)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(summary -> operation.put("operationTagSummary", config.escapeText(summary)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getKind)
-                        .filter(Objects::nonNull)
-                        .findFirst()
-                        .ifPresent(kind -> operation.put("operationTagKind", config.escapeText(kind)));
-                Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
-                        .filter(t -> tag.equalsIgnoreCase(t.getName()))
-                        .map(Tag::getName)
-                        .filter(Objects::nonNull)
-                        .map(resolveTagAncestorChains()::get)
-                        .filter(Objects::nonNull)
-                        .filter(ancestors -> !ancestors.isEmpty())
-                        .findFirst()
-                        .ifPresent(ancestors -> {
-                            operation.put("operationTagParent", config.escapeText(ancestors.get(ancestors.size() - 1)));
-                            operation.put("operationTagAncestors",
-                                    ancestors.stream().map(config::escapeText).collect(Collectors.toList()));
-                        });
+                putTagMetadata(operation, tag, wks, tagsByGroupName, tagAncestorChains);
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());

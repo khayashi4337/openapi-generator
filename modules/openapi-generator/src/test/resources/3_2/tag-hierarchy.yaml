@@ -17,6 +17,24 @@ tags:
     parent: b
   - name: b
     parent: a
+  - name: x
+    parent: a
+  - name: pet-store
+    summary: Pet Store Summary
+    kind: badge
+  - name: Root
+    parent: root
+  - name: Foo
+    parent: foo
+  - name: foo
+  - name: "c,d"
+    parent: e
+  - name: e
+    parent: "c,d"
+  - name: c
+    parent: "d,e"
+  - name: "d,e"
+    parent: c
 paths:
   /pets:
     get:
@@ -63,6 +81,95 @@ paths:
       operationId: opB
       tags:
         - b
+      responses:
+        '200':
+          description: ok
+  /x:
+    get:
+      operationId: opX
+      tags:
+        - x
+      responses:
+        '200':
+          description: ok
+  /pet-store:
+    get:
+      operationId: listPetStore
+      tags:
+        - pet-store
+      responses:
+        '200':
+          description: ok
+  /root:
+    get:
+      operationId: opRoot
+      tags:
+        - Root
+      responses:
+        '200':
+          description: ok
+  /foo-upper:
+    get:
+      operationId: aFooFirst
+      tags:
+        - Foo
+      responses:
+        '200':
+          description: ok
+  /foo-lower:
+    get:
+      operationId: zFooSecond
+      tags:
+        - foo
+      responses:
+        '200':
+          description: ok
+  /cd:
+    get:
+      operationId: opCd
+      tags:
+        - "c,d"
+      responses:
+        '200':
+          description: ok
+  /e:
+    get:
+      operationId: opE
+      tags:
+        - e
+      responses:
+        '200':
+          description: ok
+  /c:
+    get:
+      operationId: opC
+      tags:
+        - c
+      responses:
+        '200':
+          description: ok
+  /de:
+    get:
+      operationId: opDe
+      tags:
+        - "d,e"
+      responses:
+        '200':
+          description: ok
+webhooks:
+  petStoreChanged:
+    post:
+      operationId: onPetStoreChanged
+      tags:
+        - pet-store
+      responses:
+        '200':
+          description: ok
+  puppyChanged:
+    post:
+      operationId: onPuppyChanged
+      tags:
+        - puppies
       responses:
         '200':
           description: ok

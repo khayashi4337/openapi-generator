@@ -13,10 +13,12 @@ import io.swagger.v3.oas.models.parameters.QueryParameter;
 import io.swagger.v3.oas.models.parameters.RequestBody;
 import io.swagger.v3.oas.models.responses.ApiResponse;
 import io.swagger.v3.oas.models.responses.ApiResponses;
+import io.swagger.v3.oas.models.tags.Tag;
 import org.openapitools.codegen.config.CodegenConfigurator;
 import org.openapitools.codegen.config.GlobalSettings;
 import org.openapitools.codegen.model.ModelMap;
 import org.openapitools.codegen.model.OperationsMap;
+import org.openapitools.codegen.model.WebhooksMap;
 import org.openapitools.codegen.utils.ModelUtils;
 import org.slf4j.LoggerFactory;
 import org.testng.Assert;
@@ -1211,58 +1213,167 @@ public class DefaultGeneratorTest {
 
             Map<String, OperationsMap> byTag = new HashMap<>();
             for (OperationsMap operation : allOperations) {
-                byTag.put((String) operation.get("operationTagName"), operation);
+                byTag.put((String) operation.get("baseName"), operation);
             }
 
-            OperationsMap puppies = byTag.get("puppies");
+            OperationsMap puppies = byTag.get("Puppies");
             Assert.assertNotNull(puppies);
             Assert.assertEquals(puppies.get("operationTagParent"), "dogs");
-            Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList("pets", "dogs"));
+            Assert.assertEquals(puppies.get("operationTagParentBaseName"), "Dogs");
+            Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList(
+                    Map.of("name", "pets", "baseName", "Pets"),
+                    Map.of("name", "dogs", "baseName", "Dogs")));
 
-            OperationsMap pets = byTag.get("pets");
+            OperationsMap pets = byTag.get("Pets");
             Assert.assertNotNull(pets);
             Assert.assertEquals(pets.get("operationTagSummary"), "Pets Summary");
             Assert.assertEquals(pets.get("operationTagKind"), "nav");
             Assert.assertFalse(pets.containsKey("operationTagParent"));
             Assert.assertFalse(pets.containsKey("operationTagAncestors"));
 
-            OperationsMap orphan = byTag.get("orphan");
+            // 'pet-store' resolves to group 'PetStore' through sanitizeTag; the historical
+            // operationTagName lookup cannot match it and stays absent (unchanged behavior)
+            OperationsMap petStore = byTag.get("PetStore");
+            Assert.assertNotNull(petStore);
+            Assert.assertFalse(petStore.containsKey("operationTagName"));
+            Assert.assertEquals(petStore.get("operationTagSummary"), "Pet Store Summary");
+            Assert.assertEquals(petStore.get("operationTagKind"), "badge");
+            Assert.assertFalse(petStore.containsKey("operationTagParent"));
+
+            OperationsMap orphan = byTag.get("Orphan");
             Assert.assertNotNull(orphan);
             Assert.assertFalse(orphan.containsKey("operationTagParent"));
             Assert.assertFalse(orphan.containsKey("operationTagAncestors"));
 
-            OperationsMap a = byTag.get("a");
+            OperationsMap a = byTag.get("A");
             Assert.assertNotNull(a);
             Assert.assertEquals(a.get("operationTagParent"), "b");
-            Assert.assertEquals(a.get("operationTagAncestors"), Collections.singletonList("b"));
+            Assert.assertEquals(a.get("operationTagAncestors"),
+                    Collections.singletonList(Map.of("name", "b", "baseName", "B")));
 
-            OperationsMap b = byTag.get("b");
+            OperationsMap b = byTag.get("B");
             Assert.assertNotNull(b);
             Assert.assertEquals(b.get("operationTagParent"), "a");
-            Assert.assertEquals(b.get("operationTagAncestors"), Collections.singletonList("a"));
+            Assert.assertEquals(b.get("operationTagAncestors"),
+                    Collections.singletonList(Map.of("name", "a", "baseName", "A")));
 
+            // x -> a -> b -> a: the chain stops before re-entering 'a' and keeps the
+            // cycle members it walked, ordered root to direct parent
+            OperationsMap x = byTag.get("X");
+            Assert.assertNotNull(x);
+            Assert.assertEquals(x.get("operationTagParent"), "a");
+            Assert.assertEquals(x.get("operationTagAncestors"), Arrays.asList(
+                    Map.of("name", "b", "baseName", "B"),
+                    Map.of("name", "a", "baseName", "A")));
+
+            // parent matching is case-sensitive: 'root' is not the defined tag 'Root'
+            OperationsMap root = byTag.get("Root");
+            Assert.assertNotNull(root);
+            Assert.assertFalse(root.containsKey("operationTagParent"));
+            Assert.assertFalse(root.containsKey("operationTagAncestors"));
+
+            // 'Foo' and 'foo' are distinct tags, so Foo -> foo is not a cycle. Both sanitize
+            // to group 'Foo'; 'Foo' wins because the first operation's tags name it
+            OperationsMap foo = byTag.get("Foo");
+            Assert.assertNotNull(foo);
+            Assert.assertEquals(foo.get("operationTagParent"), "foo");
+            Assert.assertEquals(foo.get("operationTagParentBaseName"), "Foo");
+            Assert.assertEquals(foo.get("operationTagAncestors"),
+                    Collections.singletonList(Map.of("name", "foo", "baseName", "Foo")));
+
+            // exercises the pre-existing tag propagation onto CodegenOperation.tags —
+            // not produced by this feature, kept as a fixture sanity check
             CodegenOperation puppiesOperation = puppies.getOperations().getOperation().get(0);
             Assert.assertEquals(puppiesOperation.tags.get(0).getParent(), "dogs");
 
-            boolean warnedMissing = false;
-            boolean warnedCycle = false;
-            for (ILoggingEvent event : listAppender.list) {
-                if (event.getLevel() != ch.qos.logback.classic.Level.WARN) {
-                    continue;
-                }
-                String message = event.getFormattedMessage();
-                if (message.contains("orphan") && message.contains("missing")) {
-                    warnedMissing = true;
-                }
-                if (message.contains("Circular tag parent")) {
-                    warnedCycle = true;
-                }
+            // missing parents: 'orphan' -> 'missing' and 'Root' -> 'root', once each
+            Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 2);
+            // distinct cycles: {a,b}, {"c,d",e} and {c,"d,e"}, once each
+            Assert.assertEquals(countWarnContaining(listAppender, "Circular tag parent reference"), 3);
+
+            listAppender.list.clear();
+            List<WebhooksMap> allWebhooks = new ArrayList<>();
+            generator.generateWebhooks(new ArrayList<>(), allWebhooks, new ArrayList<>());
+
+            Map<String, WebhooksMap> webhooksByTag = new HashMap<>();
+            for (WebhooksMap webhook : allWebhooks) {
+                webhooksByTag.put((String) webhook.get("baseName"), webhook);
             }
-            Assert.assertTrue(warnedMissing, "expected a WARN about tag 'orphan' declaring a missing parent");
-            Assert.assertTrue(warnedCycle, "expected a WARN about a circular tag parent reference");
+
+            WebhooksMap petStoreWebhook = webhooksByTag.get("PetStore");
+            Assert.assertNotNull(petStoreWebhook);
+            Assert.assertEquals(petStoreWebhook.get("operationTagSummary"), "Pet Store Summary");
+            Assert.assertEquals(petStoreWebhook.get("operationTagKind"), "badge");
+
+            WebhooksMap puppyWebhook = webhooksByTag.get("Puppies");
+            Assert.assertNotNull(puppyWebhook);
+            Assert.assertEquals(puppyWebhook.get("operationTagParent"), "dogs");
+            Assert.assertEquals(puppyWebhook.get("operationTagParentBaseName"), "Dogs");
+            Assert.assertEquals(puppyWebhook.get("operationTagAncestors"), Arrays.asList(
+                    Map.of("name", "pets", "baseName", "Pets"),
+                    Map.of("name", "dogs", "baseName", "Dogs")));
+
+            Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 2);
+            Assert.assertEquals(countWarnContaining(listAppender, "Circular tag parent reference"), 3);
         } finally {
             logger.detachAppender(listAppender);
         }
+    }
+
+    private int countWarnContaining(ListAppender<ILoggingEvent> listAppender, String text) {
+        int count = 0;
+        for (ILoggingEvent event : listAppender.list) {
+            if (event.getLevel() == ch.qos.logback.classic.Level.WARN
+                    && event.getFormattedMessage().contains(text)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    @Test
+    public void testTagAncestorChainsRebuiltPerGeneration() {
+        OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/tag-hierarchy.yaml");
+        ClientOptInput opts = new ClientOptInput();
+        opts.openAPI(openAPI);
+        DefaultCodegen config = new DefaultCodegen();
+        opts.config(config);
+        final DefaultGenerator generator = new DefaultGenerator();
+        generator.opts(opts);
+        generator.configureGeneratorProperties();
+
+        List<OperationsMap> allOperations = new ArrayList<>();
+        generator.generateApis(new ArrayList<>(), allOperations, new ArrayList<>());
+        OperationsMap puppies = null;
+        for (OperationsMap operation : allOperations) {
+            if ("Puppies".equals(operation.get("baseName"))) {
+                puppies = operation;
+            }
+        }
+        Assert.assertNotNull(puppies);
+        Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList(
+                Map.of("name", "pets", "baseName", "Pets"),
+                Map.of("name", "dogs", "baseName", "Dogs")));
+
+        // reparent 'puppies' under 'pets' on the same OpenAPI instance and regenerate:
+        // the new parent must be reflected because chains are built per call
+        for (Tag tag : openAPI.getTags()) {
+            if ("puppies".equals(tag.getName())) {
+                tag.setParent("pets");
+            }
+        }
+        List<OperationsMap> regenerated = new ArrayList<>();
+        generator.generateApis(new ArrayList<>(), regenerated, new ArrayList<>());
+        OperationsMap regeneratedPuppies = null;
+        for (OperationsMap operation : regenerated) {
+            if ("Puppies".equals(operation.get("baseName"))) {
+                regeneratedPuppies = operation;
+            }
+        }
+        Assert.assertNotNull(regeneratedPuppies);
+        Assert.assertEquals(regeneratedPuppies.get("operationTagParent"), "pets");
+        Assert.assertEquals(regeneratedPuppies.get("operationTagAncestors"),
+                Collections.singletonList(Map.of("name", "pets", "baseName", "Pets")));
     }
 
     private DefaultGenerator generatorGenerateRecursiveDependentModelsBackwardCompatibility(String recursively) throws IOException {
