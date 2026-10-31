@@ -11,6 +11,12 @@ import java.util.Objects;
 @Getter
 public class CodegenMediaType {
     private CodegenProperty schema;
+    /**
+     * OAS 3.2: schema of each item of a sequential (streaming) media type such as
+     * {@code text/event-stream}, {@code application/jsonl} or {@code application/json-seq}.
+     * {@code null} for media types without an {@code itemSchema}.
+     */
+    private CodegenProperty itemSchema;
     private LinkedHashMap<String, CodegenEncoding> encoding;
     private HashMap<String, SchemaTestCase> testCases = new HashMap<>();
     private Map<String, Example> examples = null;
@@ -35,9 +41,14 @@ public class CodegenMediaType {
         this.example = example;
     }
 
+    public void setItemSchema(CodegenProperty itemSchema) {
+        this.itemSchema = itemSchema;
+    }
+
     public String toString() {
         final StringBuilder sb = new StringBuilder("CodegenMediaType{");
         sb.append("schema=").append(schema);
+        sb.append(", itemSchema=").append(itemSchema);
         sb.append(", encoding=").append(encoding);
         sb.append(", vendorExtensions=").append(vendorExtensions);
         sb.append('}');
@@ -49,13 +60,14 @@ public class CodegenMediaType {
         if (o == null || getClass() != o.getClass()) return false;
         CodegenMediaType that = (CodegenMediaType) o;
         return Objects.equals(schema, that.getSchema()) &&
+                Objects.equals(itemSchema, that.getItemSchema()) &&
                 Objects.equals(encoding, that.getEncoding()) &&
                 Objects.equals(vendorExtensions, that.vendorExtensions);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(schema, encoding, vendorExtensions);
+        return Objects.hash(schema, itemSchema, encoding, vendorExtensions);
     }
 }
 

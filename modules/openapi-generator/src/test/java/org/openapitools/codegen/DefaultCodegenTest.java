@@ -2880,6 +2880,101 @@ public class DefaultCodegenTest {
     }
 
     @Test
+    public void itemSchemaOnlyResponseWarnsAndCarriesItemSchema() {
+        // 3.2: a response whose content is only application/jsonl + itemSchema declares no
+        // 'schema' at all: the return type stays void, a warning names the media type whose
+        // itemSchema is not used for code generation yet, and the item schema itself is
+        // still exposed on the CodegenMediaType.
+        ListAppender<ILoggingEvent> listAppender = new ListAppender<>();
+        listAppender.start();
+        testLogger.addAppender(listAppender);
+
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation streamOp = openAPI.getPaths().get("/events/stream").getGet();
+        CodegenOperation co = codegen.fromOperation("/events/stream", "get", streamOp, null);
+
+        listAppender.stop();
+        testLogger.detachAppender(listAppender);
+
+        assertNull(co.returnType, "itemSchema-only response must not produce a return type yet");
+        CodegenResponse r = co.responses.get(0);
+        CodegenMediaType jsonl = r.getContent().get("application/jsonl");
+        assertNotNull(jsonl);
+        assertNull(jsonl.getSchema());
+        assertNotNull(jsonl.getItemSchema());
+        assertEquals("Event", jsonl.getItemSchema().dataType);
+
+        List<ILoggingEvent> logsList = new ArrayList<>(listAppender.list).stream()
+                .filter(log -> Objects.equals(log.getThreadName(), Thread.currentThread().getName()))
+                .collect(Collectors.toList());
+        assertTrue(logsList.stream().anyMatch(log -> log.getLevel() == Level.WARN
+                        && log.getFormattedMessage().contains("application/jsonl")
+                        && log.getFormattedMessage().contains("itemSchema")),
+                "expected a warning naming the itemSchema-only media type, got: " + logsList);
+    }
+
+    @Test
+    public void itemSchemaOnlyMediaTypeDoesNotShadowFollowingSchema() {
+        // 3.2: text/event-stream declared before application/json must not shadow the JSON
+        // schema: the operation return type is derived from application/json's schema
+        // (array of Event), not degraded to void or typed by the stream item.
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation listOp = openAPI.getPaths().get("/events").getGet();
+        CodegenOperation co = codegen.fromOperation("/events", "get", listOp, null);
+
+        assertEquals("Event", co.returnBaseType);
+        assertNotNull(co.returnType, "return type must not be void: it comes from application/json's schema");
+
+        // the SSE media type keeps no 'schema' but carries its itemSchema
+        CodegenResponse r = co.responses.get(0);
+        CodegenMediaType sse = r.getContent().get("text/event-stream");
+        assertNotNull(sse);
+        assertNull(sse.getSchema());
+        assertNotNull(sse.getItemSchema());
+        assertEquals("StreamEvent", sse.getItemSchema().dataType);
+    }
+
+    @Test
+    public void itemSchemaInlineModelIsExtractedIntoComponents() {
+        // the inline object inside text/event-stream's itemSchema is flattened into
+        // components like any inline schema
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+
+        assertNotNull(openAPI.getComponents().getSchemas().get("StreamEvent"),
+                "inline itemSchema object should be extracted into components");
+        MediaType sse = openAPI.getPaths().get("/events").getGet().getResponses()
+                .get("200").getContent().get("text/event-stream");
+        assertEquals("#/components/schemas/StreamEvent", sse.getItemSchema().get$ref());
+    }
+
+    @Test
+    public void mediaTypeWithSchemaAndItemSchemaKeepsBoth() {
+        // 'schema' stays the schema the media type is typed by, and 'itemSchema' is carried
+        // alongside it on the CodegenMediaType (OAS 3.2 allows both on one media type)
+        final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_2/item-schema.yaml");
+        final DefaultCodegen codegen = new DefaultCodegen();
+        codegen.setOpenAPI(openAPI);
+
+        Operation batchOp = openAPI.getPaths().get("/events/batch").getGet();
+        CodegenOperation co = codegen.fromOperation("/events/batch", "get", batchOp, null);
+
+        assertEquals("EventBatch", co.returnBaseType);
+        CodegenResponse r = co.responses.get(0);
+        CodegenMediaType jsonSeq = r.getContent().get("application/json-seq");
+        assertNotNull(jsonSeq);
+        assertNotNull(jsonSeq.getSchema());
+        assertEquals("EventBatch", jsonSeq.getSchema().dataType);
+        assertNotNull(jsonSeq.getItemSchema());
+        assertEquals("Event", jsonSeq.getItemSchema().dataType);
+    }
+
+    @Test
     public void objectQueryParamIdentifyAsObject() {
         final OpenAPI openAPI = TestUtils.parseFlattenSpec("src/test/resources/3_0/objectQueryParam.yaml");
         new InlineModelResolver().flatten(openAPI);

@@ -318,6 +318,11 @@ public class ModelUtils {
                 if (e.getValue().getSchema() != null) {
                     visitSchema(openAPI, e.getValue().getSchema(), e.getKey(), visitedSchemas, visitor);
                 }
+                // OAS 3.2 itemSchema (per-item schema of a sequential media type) is walked like
+                // schema: its inline schemas and referenced schemas are visited the same way.
+                if (e.getValue().getItemSchema() != null) {
+                    visitSchema(openAPI, e.getValue().getItemSchema(), e.getKey(), visitedSchemas, visitor);
+                }
             }
         }
     }
@@ -1499,6 +1504,13 @@ public class ModelUtils {
      * $ref: '#/components/schemas/XYZ'
      * application/xml:
      * ...
+     * <p>
+     * A media type declaring only {@code itemSchema} (OAS 3.2 sequential/streaming media types
+     * such as {@code text/event-stream} or {@code application/jsonl}) carries no {@code schema}
+     * of its own and is skipped: it must not shadow the schema of a media type declared after it.
+     * When no media type in the section declares {@code schema} but at least one declares only
+     * {@code itemSchema}, this method still returns {@code null} ({@code itemSchema} is not used
+     * for code generation yet) and logs a warning naming those media types.
      *
      * @param content a 'content' section in the OAS specification.
      * @return the Schema.
@@ -1507,14 +1519,47 @@ public class ModelUtils {
         if (content == null || content.isEmpty()) {
             return null;
         }
-        Map.Entry<String, MediaType> entry = content.entrySet().iterator().next();
-        if (content.size() > 1) {
-            // Other content types are currently ignored by codegen. If you see this warning,
-            // reorder the OAS spec to put the desired content type first.
-            once(LOGGER).debug("Multiple schemas found in the OAS 'content' section, returning only the first one ({})",
-                    entry.getKey());
+        boolean decided = false;
+        boolean hasAnySchema = false;
+        List<String> itemSchemaOnlyMediaTypes = null;
+        Schema schema = null;
+        for (Map.Entry<String, MediaType> entry : content.entrySet()) {
+            MediaType mediaType = entry.getValue();
+            if (mediaType == null) {
+                continue;
+            }
+            if (mediaType.getSchema() != null) {
+                hasAnySchema = true;
+            }
+            if (mediaType.getSchema() == null && mediaType.getItemSchema() != null) {
+                // OAS 3.2: a media type describing only a stream (e.g. text/event-stream,
+                // application/jsonl) carries no 'schema' of its own, so it must not shadow
+                // the schema of a media type declared after it.
+                if (itemSchemaOnlyMediaTypes == null) {
+                    itemSchemaOnlyMediaTypes = new ArrayList<>();
+                }
+                itemSchemaOnlyMediaTypes.add(entry.getKey());
+                continue;
+            }
+            if (!decided) {
+                // the first media type that is not itemSchema-only decides, as the first
+                // media type in declaration order did before OAS 3.2; it may still carry
+                // no schema at all, in which case this returns null
+                decided = true;
+                schema = mediaType.getSchema();
+                if (content.size() > 1) {
+                    // Other content types are currently ignored by codegen. If you see this warning,
+                    // reorder the OAS spec to put the desired content type first.
+                    once(LOGGER).debug("Multiple schemas found in the OAS 'content' section, returning only the first one ({})",
+                            entry.getKey());
+                }
+            }
         }
-        return entry.getValue().getSchema();
+        if (!hasAnySchema && itemSchemaOnlyMediaTypes != null) {
+            LOGGER.warn("No media type in the OAS 'content' section declares a 'schema'; 'itemSchema' of media type(s) {} is not used for code generation yet, returning null",
+                    itemSchemaOnlyMediaTypes);
+        }
+        return schema;
     }
 
     /**

@@ -595,16 +595,27 @@ public class InlineModelResolver {
                 continue;
             }
             Schema schema = mediaType.getSchema();
-            if (schema == null) {
-                continue;
+            if (schema != null) {
+                String schemaName = resolveModelName(schema.getTitle(), name); // name example: testPost_request
+                // Recursively gather/make inline models within this schema if any
+                gatherInlineModels(schema, schemaName);
+                if (isModelNeeded(schema)) {
+                    // If this schema should be split into its own model, do so
+                    //Schema refSchema = this.makeSchema(schemaName, schema);
+                    mediaType.setSchema(this.makeSchemaInComponents(schemaName, schema));
+                }
             }
-            String schemaName = resolveModelName(schema.getTitle(), name); // name example: testPost_request
-            // Recursively gather/make inline models within this schema if any
-            gatherInlineModels(schema, schemaName);
-            if (isModelNeeded(schema)) {
-                // If this schema should be split into its own model, do so
-                //Schema refSchema = this.makeSchema(schemaName, schema);
-                mediaType.setSchema(this.makeSchemaInComponents(schemaName, schema));
+            // OAS 3.2 itemSchema: inline models inside the per-item schema of a sequential
+            // media type are extracted exactly like schema's; a "_item" suffix keeps the
+            // backup name distinct when a media type declares both schema and itemSchema.
+            Schema itemSchema = mediaType.getItemSchema();
+            if (itemSchema != null) {
+                String itemSchemaName = resolveModelName(itemSchema.getTitle(),
+                        name == null ? null : name + "_item");
+                gatherInlineModels(itemSchema, itemSchemaName);
+                if (isModelNeeded(itemSchema)) {
+                    mediaType.setItemSchema(this.makeSchemaInComponents(itemSchemaName, itemSchema));
+                }
             }
         }
     }

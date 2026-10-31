@@ -1214,7 +1214,7 @@ public class DefaultCodegen implements CodegenConfig {
         List<String> mediaTypes = new ArrayList<>();
         Set<String> seenSchemas = new HashSet<>();
         for (Map.Entry<String, MediaType> entry : content.entrySet()) {
-            if (seenSchemas.add(schemaKey(entry.getValue() == null ? null : entry.getValue().getSchema()))) {
+            if (seenSchemas.add(mediaTypeKey(entry.getValue()))) {
                 mediaTypes.add(entry.getKey());
             }
         }
@@ -1361,6 +1361,19 @@ public class DefaultCodegen implements CodegenConfig {
         Content content = new Content();
         content.addMediaType(mediaType, source.get(mediaType));
         return content;
+    }
+
+    /**
+     * Stable identity key for a media-type: the keys of its {@code schema} and {@code itemSchema}.
+     * Two itemSchema-only media-types (OAS 3.2, e.g. a JSONL and an SSE stream) would otherwise
+     * share the key of a schema-less media-type and collapse into one axis position; an
+     * itemSchema-bearing media-type also never equals a schema-bearing one.
+     */
+    private static String mediaTypeKey(MediaType mediaType) {
+        if (mediaType == null) {
+            return "null";
+        }
+        return schemaKey(mediaType.getSchema()) + "|itemSchema=" + schemaKey(mediaType.getItemSchema());
     }
 
     /** Stable identity key for a schema: its {@code $ref} when present, else a structural key. */
@@ -8478,6 +8491,12 @@ public class DefaultCodegen implements CodegenConfig {
             if (mt.getSchema() != null) {
                 schemaProp = fromProperty(toMediaTypeSchemaName(contentType, mediaTypeSchemaSuffix), mt.getSchema(), false);
             }
+            // OAS 3.2 itemSchema: the per-item schema of a sequential (streaming) media type. Templates
+            // reach it as {{#content}}…{{#itemSchema}}; null for media types without itemSchema.
+            CodegenProperty itemSchemaProp = null;
+            if (mt.getItemSchema() != null) {
+                itemSchemaProp = fromProperty("Item" + toMediaTypeSchemaName(contentType, mediaTypeSchemaSuffix), mt.getItemSchema(), false);
+            }
             HashMap<String, SchemaTestCase> schemaTestCases = null;
             if (mt.getExtensions() != null && mt.getExtensions().containsKey(xSchemaTestExamplesKey)) {
                 Object objNodeWithRef = mt.getExtensions().get(xSchemaTestExamplesKey);
@@ -8500,6 +8519,8 @@ public class DefaultCodegen implements CodegenConfig {
                 codegenMt = new CodegenMediaType(schemaProp, ceMap, schemaTestCases);
             }
 
+            codegenMt.setItemSchema(itemSchemaProp);
+
             if (mt.getExtensions() != null) {
                 codegenMt.vendorExtensions = mt.getExtensions();
             }
@@ -8507,6 +8528,9 @@ public class DefaultCodegen implements CodegenConfig {
             cmtContent.put(contentType, codegenMt);
             if (schemaProp != null) {
                 addImports(imports, schemaProp.getImports(true, importBaseType, generatorMetadata.getFeatureSet()));
+            }
+            if (itemSchemaProp != null) {
+                addImports(imports, itemSchemaProp.getImports(true, importBaseType, generatorMetadata.getFeatureSet()));
             }
         }
         return cmtContent;

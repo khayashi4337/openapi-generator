@@ -561,11 +561,15 @@ public class OpenAPINormalizer {
             MediaType mediaType = content.get(contentType);
             if (mediaType == null) {
                 continue;
-            } else if (mediaType.getSchema() == null) {
-                continue;
-            } else {
+            }
+            if (mediaType.getSchema() != null) {
                 Schema newSchema = normalizeSchema(mediaType.getSchema(), new HashSet<>());
                 mediaType.setSchema(newSchema);
+            }
+            // OAS 3.2 itemSchema (per-item schema of a sequential media type) is normalized
+            // with the same rules as schema
+            if (mediaType.getItemSchema() != null) {
+                mediaType.setItemSchema(normalizeSchema(mediaType.getItemSchema(), new HashSet<>()));
             }
         }
     }

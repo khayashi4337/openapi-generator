@@ -1,0 +1,64 @@
+openapi: 3.2.0
+info:
+  title: itemSchema test
+  version: '1.0'
+paths:
+  /events/stream:
+    get:
+      operationId: streamEvents
+      responses:
+        '200':
+          description: JSONL stream of events
+          content:
+            application/jsonl:
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+  /events:
+    get:
+      operationId: listEvents
+      responses:
+        '200':
+          description: SSE stream first, JSON array fallback second
+          content:
+            text/event-stream:
+              itemSchema:
+                title: StreamEvent
+                type: object
+                properties:
+                  data:
+                    type: string
+                  retry:
+                    type: integer
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Event'
+  /events/batch:
+    get:
+      operationId: getEventBatch
+      responses:
+        '200':
+          description: sequential media type declaring both schema and itemSchema
+          content:
+            application/json-seq:
+              schema:
+                $ref: '#/components/schemas/EventBatch'
+              itemSchema:
+                $ref: '#/components/schemas/Event'
+components:
+  schemas:
+    Event:
+      type: object
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+    EventBatch:
+      type: object
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/Event'
