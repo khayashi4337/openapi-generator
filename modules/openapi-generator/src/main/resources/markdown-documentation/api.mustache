@@ -1,5 +1,7 @@
 # {{classname}}{{#description}}
-    {{.}}{{/description}}
+    {{.}}{{/description}}{{#operationTagAncestors}}{{#-first}}
+
+Parent: {{/-first}}{{#hasOperations}}[{{classname}}]({{classname}}.md){{/hasOperations}}{{^hasOperations}}{{{name}}}{{/hasOperations}}{{^-last}} › {{/-last}}{{/operationTagAncestors}}
 
 All URIs are relative to *{{basePath}}*
 

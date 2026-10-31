@@ -760,6 +760,15 @@ public class DefaultGenerator implements Generator {
      * @return map of declared tag name to its ordered ancestor tag names (possibly empty lists)
      */
     private Map<String, List<String>> buildTagAncestorChains(List<Tag> tags) {
+        return buildTagAncestorChains(tags, true);
+    }
+
+    /**
+     * Same as {@link #buildTagAncestorChains(List)}; pass {@code emitWarnings=false} for
+     * additional walks over the same document (e.g. the supporting-file hierarchy) so the
+     * missing-parent and cycle warnings are not repeated.
+     */
+    private Map<String, List<String>> buildTagAncestorChains(List<Tag> tags, boolean emitWarnings) {
         Map<String, List<String>> chains = new HashMap<>();
         if (tags == null) {
             return chains;
@@ -786,7 +795,7 @@ public class DefaultGenerator implements Generator {
             while (current.getParent() != null) {
                 Tag parent = byName.get(current.getParent());
                 if (parent == null) {
-                    if (warnedMissingParents.add(current.getName())) {
+                    if (emitWarnings && warnedMissingParents.add(current.getName())) {
                         LOGGER.warn("Tag '{}' declares parent '{}' which is not a defined tag; treating it as having no parent",
                                 current.getName(), current.getParent());
                     }
@@ -794,7 +803,7 @@ public class DefaultGenerator implements Generator {
                 }
                 if (!seen.add(parent.getName())) {
                     Set<String> cycle = new TreeSet<>(order.subList(order.indexOf(parent.getName()), order.size()));
-                    if (warnedCycles.add(cycle)) {
+                    if (emitWarnings && warnedCycles.add(cycle)) {
                         LOGGER.warn("Circular tag parent reference detected at tag '{}'; ancestor chain stops before re-entering it",
                                 parent.getName());
                     }
@@ -825,21 +834,24 @@ public class DefaultGenerator implements Generator {
      *   <li>{@code operationTagParentBaseName}: {@link CodegenConfig#sanitizeTag(String)} of the
      *       parent name — the parent's group name in the same shape as {@code baseName}, so
      *       templates can build links or class names pointing at the parent's API</li>
-     *   <li>{@code operationTagAncestors}: a list of {@code {name, baseName}} maps ordered from
-     *       the root to the direct parent; {@code name} is escaped for display, {@code baseName}
-     *       is the sanitized group-name form — usable as
-     *       {@code {{#operationTagAncestors}}{{name}} {{baseName}}{{/operationTagAncestors}}}</li>
+     *   <li>{@code operationTagAncestors}: a list of maps ordered from the root to the direct
+     *       parent, each with {@code name} (escaped for display), {@code baseName} (the sanitized
+     *       group-name form), {@code hasOperations}, and {@code classname}
+     *       ({@code config.toApiName(baseName)} when the ancestor group has operations) — usable
+     *       as {@code {{#operationTagAncestors}}{{name}} {{baseName}}{{/operationTagAncestors}}}</li>
      * </ul>
      * Absent values are simply not added.
      *
-     * @param operation         operation map (apis or webhooks) to populate
-     * @param tag               group name (the sanitized tag name, same value as {@code baseName})
-     * @param ops               operations grouped under {@code tag}
-     * @param tagsByGroupName   declared tags by group name, from {@link #buildTagsByGroupName}
-     * @param tagAncestorChains ancestor chains, from {@link #buildTagAncestorChains}
+     * @param operation            operation map (apis or webhooks) to populate
+     * @param tag                  group name (the sanitized tag name, same value as {@code baseName})
+     * @param ops                  operations grouped under {@code tag}
+     * @param tagsByGroupName      declared tags by group name, from {@link #buildTagsByGroupName}
+     * @param tagAncestorChains    ancestor chains, from {@link #buildTagAncestorChains}
+     * @param operationGroupNames  group names that have operations in this map's set
      */
     private void putTagMetadata(Map<String, Object> operation, String tag, List<CodegenOperation> ops,
-                                Map<String, List<Tag>> tagsByGroupName, Map<String, List<String>> tagAncestorChains) {
+                                Map<String, List<Tag>> tagsByGroupName, Map<String, List<String>> tagAncestorChains,
+                                Set<String> operationGroupNames) {
         Optional.ofNullable(openAPI.getTags()).orElseGet(Collections::emptyList).stream()
                 .map(Tag::getName)
                 .filter(Objects::nonNull)
@@ -870,14 +882,178 @@ public class DefaultGenerator implements Generator {
         String parent = ancestors.get(ancestors.size() - 1);
         operation.put("operationTagParent", config.escapeText(parent));
         operation.put("operationTagParentBaseName", config.sanitizeTag(parent));
-        List<Map<String, String>> ancestorMaps = new ArrayList<>(ancestors.size());
+        List<Map<String, Object>> ancestorMaps = new ArrayList<>(ancestors.size());
         for (String ancestor : ancestors) {
-            Map<String, String> entry = new HashMap<>(2);
+            String ancestorBaseName = config.sanitizeTag(ancestor);
+            Map<String, Object> entry = new HashMap<>(4);
             entry.put("name", config.escapeText(ancestor));
-            entry.put("baseName", config.sanitizeTag(ancestor));
+            entry.put("baseName", ancestorBaseName);
+            boolean hasOperations = operationGroupNames.contains(ancestorBaseName);
+            entry.put("hasOperations", hasOperations);
+            if (hasOperations) {
+                entry.put("classname", config.toApiName(ancestorBaseName));
+            }
             ancestorMaps.add(entry);
         }
         operation.put("operationTagAncestors", ancestorMaps);
+    }
+
+    /**
+     * True when {@code name} sits on a tag-parent cycle: following each tag's resolved parent
+     * (the last element of its ancestor chain) eventually returns to {@code name}.
+     */
+    private boolean isTagOnCycle(String name, Map<String, List<String>> chains) {
+        Set<String> walked = new HashSet<>();
+        String current = name;
+        while (true) {
+            List<String> chain = chains.get(current);
+            if (chain == null || chain.isEmpty()) {
+                return false;
+            }
+            String parent = chain.get(chain.size() - 1);
+            if (parent.equals(name)) {
+                return true;
+            }
+            if (!walked.add(parent)) {
+                return false;
+            }
+            current = parent;
+        }
+    }
+
+    /**
+     * Display name for an operation group whose name does not resolve to a declared tag: the
+     * raw tag name carried by the group's operations, or the group name itself as a fallback.
+     */
+    private String operationTagDisplayName(OperationsMap operation, String baseName) {
+        if (operation.getOperations() != null && operation.getOperations().getOperation() != null) {
+            for (CodegenOperation op : operation.getOperations().getOperation()) {
+                if (op.tags == null) {
+                    continue;
+                }
+                for (Tag candidate : op.tags) {
+                    if (candidate.getName() != null && baseName.equals(config.sanitizeTag(candidate.getName()))) {
+                        return candidate.getName();
+                    }
+                }
+            }
+        }
+        return baseName;
+    }
+
+    /**
+     * Builds a flat, depth-first-ordered list of the tag hierarchy for documentation templates.
+     * Returns an empty list when no declared tag sets a {@code parent} — callers leave the
+     * {@code apiTagHierarchy} key out of the bundle then, so documents without tag parents stay
+     * unchanged.
+     *
+     * <p>Roots are nodes without a resolved parent — declared tags with no parent, a missing
+     * parent, or a parent edge cut because the tag sits on a cycle (the same treatment as
+     * operation-map metadata, so no extra warnings are emitted) — in {@link OpenAPI#getTags()}
+     * order, followed by undeclared operation groups in order of first appearance. Children are
+     * linked through the resolved parent and also follow declaration order. A declared tag with
+     * no operations is still emitted as a node. Each item carries {@code name} (escaped for
+     * display), {@code baseName} (the sanitized group name), {@code hasOperations},
+     * {@code indent} (two spaces per depth level), {@code classname}
+     * ({@code config.toApiName(baseName)}, only for tags with operations), and declared
+     * {@code summary}/{@code kind} (escaped) when present.
+     *
+     * @param allOperations operation maps, used to tell which groups have operations
+     * @return depth-first-ordered hierarchy items, or an empty list when no tag has a parent
+     */
+    private List<Map<String, Object>> buildApiTagHierarchy(List<OperationsMap> allOperations) {
+        List<Tag> declaredTags = openAPI == null ? null : openAPI.getTags();
+        boolean anyParent = declaredTags != null && declaredTags.stream()
+                .anyMatch(tag -> tag.getParent() != null);
+        if (!anyParent) {
+            return Collections.emptyList();
+        }
+        Map<String, List<String>> chains = buildTagAncestorChains(declaredTags, false);
+        // nodes keyed by group name; declared tags first in declaration order, then undeclared
+        // operation groups in order of first appearance
+        Map<String, Map<String, Object>> nodes = new LinkedHashMap<>();
+        Map<String, Tag> firstDeclaredByGroup = new HashMap<>();
+        if (declaredTags != null) {
+            for (Tag tag : declaredTags) {
+                if (tag.getName() == null) {
+                    continue;
+                }
+                String baseName = config.sanitizeTag(tag.getName());
+                firstDeclaredByGroup.putIfAbsent(baseName, tag);
+                Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
+                node.put("name", config.escapeText(tag.getName()));
+                node.put("baseName", baseName);
+                node.put("hasOperations", false);
+                if (tag.getSummary() != null) {
+                    node.put("summary", config.escapeText(tag.getSummary()));
+                }
+                if (tag.getKind() != null) {
+                    node.put("kind", config.escapeText(tag.getKind()));
+                }
+            }
+        }
+        if (allOperations != null) {
+            for (OperationsMap operation : allOperations) {
+                String baseName = (String) operation.get("baseName");
+                if (baseName == null) {
+                    continue;
+                }
+                Map<String, Object> node = nodes.computeIfAbsent(baseName, k -> new LinkedHashMap<>());
+                node.put("hasOperations", true);
+                node.put("classname", config.toApiName(baseName));
+                if (!node.containsKey("name")) {
+                    node.put("name", config.escapeText(operationTagDisplayName(operation, baseName)));
+                    node.put("baseName", baseName);
+                }
+            }
+        }
+        // parent edge of each node, cut for cycle members and self-references so the tree stays
+        // a forest; children are collected in declaration order
+        Map<String, String> parentOf = new HashMap<>();
+        Map<String, List<String>> childrenOf = new HashMap<>();
+        for (Map.Entry<String, Map<String, Object>> entry : nodes.entrySet()) {
+            String baseName = entry.getKey();
+            Tag declared = firstDeclaredByGroup.get(baseName);
+            if (declared == null) {
+                continue;
+            }
+            List<String> chain = chains.get(declared.getName());
+            if (chain == null || chain.isEmpty() || isTagOnCycle(declared.getName(), chains)) {
+                continue;
+            }
+            String parentBaseName = config.sanitizeTag(chain.get(chain.size() - 1));
+            if (parentBaseName.equals(baseName) || !nodes.containsKey(parentBaseName)) {
+                continue;
+            }
+            parentOf.put(baseName, parentBaseName);
+            childrenOf.computeIfAbsent(parentBaseName, k -> new ArrayList<>()).add(baseName);
+        }
+        List<Map<String, Object>> items = new ArrayList<>();
+        Deque<Map.Entry<String, Integer>> stack = new ArrayDeque<>();
+        List<String> roots = new ArrayList<>();
+        for (String baseName : nodes.keySet()) {
+            if (!parentOf.containsKey(baseName)) {
+                roots.add(baseName);
+            }
+        }
+        for (int i = roots.size() - 1; i >= 0; i--) {
+            stack.push(new AbstractMap.SimpleEntry<>(roots.get(i), 0));
+        }
+        while (!stack.isEmpty()) {
+            Map.Entry<String, Integer> next = stack.pop();
+            String baseName = next.getKey();
+            int depth = next.getValue();
+            Map<String, Object> item = new LinkedHashMap<>(nodes.get(baseName));
+            item.put("indent", "  ".repeat(depth));
+            items.add(item);
+            List<String> children = childrenOf.get(baseName);
+            if (children != null) {
+                for (int i = children.size() - 1; i >= 0; i--) {
+                    stack.push(new AbstractMap.SimpleEntry<>(children.get(i), depth + 1));
+                }
+            }
+        }
+        return items;
     }
 
     void generateApis(List<File> files, List<OperationsMap> allOperations, List<ModelMap> allModels) {
@@ -913,7 +1089,7 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                putTagMetadata(operation, tag, ops, tagsByGroupName, tagAncestorChains);
+                putTagMetadata(operation, tag, ops, tagsByGroupName, tagAncestorChains, paths.keySet());
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -1063,7 +1239,7 @@ public class DefaultGenerator implements Generator {
                 operation.put("basePathWithoutHost", removeTrailingSlash(config.encodePath(url.getPath())));
                 operation.put("contextPath", contextPath);
                 operation.put("baseName", tag);
-                putTagMetadata(operation, tag, wks, tagsByGroupName, tagAncestorChains);
+                putTagMetadata(operation, tag, wks, tagsByGroupName, tagAncestorChains, webhooks.keySet());
                 Optional.ofNullable(config.additionalProperties().get("appVersion")).ifPresent(version -> operation.put("version", version));
                 operation.put("apiPackage", config.apiPackage());
                 operation.put("modelPackage", config.modelPackage());
@@ -1356,6 +1532,10 @@ public class DefaultGenerator implements Generator {
         }
         bundle.put("contextPath", contextPath);
         bundle.put("apiInfo", apis);
+        List<Map<String, Object>> apiTagHierarchy = buildApiTagHierarchy(allOperations);
+        if (!apiTagHierarchy.isEmpty()) {
+            bundle.put("apiTagHierarchy", apiTagHierarchy);
+        }
         bundle.put("webhooks", allWebhooks);
         bundle.put("models", allModels);
         bundle.put("aliasModels", aliasModels);

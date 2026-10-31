@@ -11,6 +11,13 @@ All URIs are relative to *{{{basePath}}}*
 {{#apiInfo}}{{#apis}}{{#operations}}| {{#operation}}*{{classname}}* | [**{{operationId}}**](Apis/{{apiDocPath}}{{classname}}.md#{{operationId}}) | **{{httpMethod}}** {{path}} | {{{summary}}}{{^summary}}{{{notes}}}{{/summary}} |
 {{/operation}}{{/operations}}{{/apis}}{{/apiInfo}}
 {{/generateApiDocs}}
+{{#apiTagHierarchy}}{{#-first}}
+
+<a name="documentation-for-api-groups"></a>
+## API Groups
+
+{{/-first}}{{{indent}}}- {{#hasOperations}}[{{classname}}](Apis/{{apiDocPath}}{{classname}}.md){{/hasOperations}}{{^hasOperations}}{{{name}}} (no operations){{/hasOperations}}{{#summary}} — {{{summary}}}{{/summary}}{{#kind}} *({{{kind}}})*{{/kind}}
+{{/apiTagHierarchy}}
 
 {{#generateModelDocs}}
 <a name="documentation-for-models"></a>

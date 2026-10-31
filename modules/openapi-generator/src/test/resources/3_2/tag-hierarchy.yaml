@@ -35,6 +35,13 @@ tags:
     parent: "d,e"
   - name: "d,e"
     parent: c
+  - name: animals
+  - name: cats
+    parent: animals
+  - name: webhook-pet
+    summary: Webhook Pet Summary
+    kind: nav
+    parent: pet-store
 paths:
   /pets:
     get:
@@ -156,20 +163,20 @@ paths:
       responses:
         '200':
           description: ok
-webhooks:
-  petStoreChanged:
-    post:
-      operationId: onPetStoreChanged
+  /cats:
+    get:
+      operationId: listCats
       tags:
-        - pet-store
+        - cats
       responses:
         '200':
           description: ok
-  puppyChanged:
+webhooks:
+  petChanged:
     post:
-      operationId: onPuppyChanged
+      operationId: onPetChanged
       tags:
-        - puppies
+        - webhook-pet
       responses:
         '200':
           description: ok

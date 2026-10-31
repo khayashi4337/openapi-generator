@@ -1221,8 +1221,8 @@ public class DefaultGeneratorTest {
             Assert.assertEquals(puppies.get("operationTagParent"), "dogs");
             Assert.assertEquals(puppies.get("operationTagParentBaseName"), "Dogs");
             Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList(
-                    Map.of("name", "pets", "baseName", "Pets"),
-                    Map.of("name", "dogs", "baseName", "Dogs")));
+                    Map.of("name", "pets", "baseName", "Pets", "hasOperations", true, "classname", "PetsApi"),
+                    Map.of("name", "dogs", "baseName", "Dogs", "hasOperations", true, "classname", "DogsApi")));
 
             OperationsMap pets = byTag.get("Pets");
             Assert.assertNotNull(pets);
@@ -1249,13 +1249,13 @@ public class DefaultGeneratorTest {
             Assert.assertNotNull(a);
             Assert.assertEquals(a.get("operationTagParent"), "b");
             Assert.assertEquals(a.get("operationTagAncestors"),
-                    Collections.singletonList(Map.of("name", "b", "baseName", "B")));
+                    Collections.singletonList(Map.of("name", "b", "baseName", "B", "hasOperations", true, "classname", "BApi")));
 
             OperationsMap b = byTag.get("B");
             Assert.assertNotNull(b);
             Assert.assertEquals(b.get("operationTagParent"), "a");
             Assert.assertEquals(b.get("operationTagAncestors"),
-                    Collections.singletonList(Map.of("name", "a", "baseName", "A")));
+                    Collections.singletonList(Map.of("name", "a", "baseName", "A", "hasOperations", true, "classname", "AApi")));
 
             // x -> a -> b -> a: the chain stops before re-entering 'a' and keeps the
             // cycle members it walked, ordered root to direct parent
@@ -1263,8 +1263,8 @@ public class DefaultGeneratorTest {
             Assert.assertNotNull(x);
             Assert.assertEquals(x.get("operationTagParent"), "a");
             Assert.assertEquals(x.get("operationTagAncestors"), Arrays.asList(
-                    Map.of("name", "b", "baseName", "B"),
-                    Map.of("name", "a", "baseName", "A")));
+                    Map.of("name", "b", "baseName", "B", "hasOperations", true, "classname", "BApi"),
+                    Map.of("name", "a", "baseName", "A", "hasOperations", true, "classname", "AApi")));
 
             // parent matching is case-sensitive: 'root' is not the defined tag 'Root'
             OperationsMap root = byTag.get("Root");
@@ -1279,7 +1279,7 @@ public class DefaultGeneratorTest {
             Assert.assertEquals(foo.get("operationTagParent"), "foo");
             Assert.assertEquals(foo.get("operationTagParentBaseName"), "Foo");
             Assert.assertEquals(foo.get("operationTagAncestors"),
-                    Collections.singletonList(Map.of("name", "foo", "baseName", "Foo")));
+                    Collections.singletonList(Map.of("name", "foo", "baseName", "Foo", "hasOperations", true, "classname", "FooApi")));
 
             // exercises the pre-existing tag propagation onto CodegenOperation.tags —
             // not produced by this feature, kept as a fixture sanity check
@@ -1300,18 +1300,15 @@ public class DefaultGeneratorTest {
                 webhooksByTag.put((String) webhook.get("baseName"), webhook);
             }
 
-            WebhooksMap petStoreWebhook = webhooksByTag.get("PetStore");
-            Assert.assertNotNull(petStoreWebhook);
-            Assert.assertEquals(petStoreWebhook.get("operationTagSummary"), "Pet Store Summary");
-            Assert.assertEquals(petStoreWebhook.get("operationTagKind"), "badge");
-
-            WebhooksMap puppyWebhook = webhooksByTag.get("Puppies");
-            Assert.assertNotNull(puppyWebhook);
-            Assert.assertEquals(puppyWebhook.get("operationTagParent"), "dogs");
-            Assert.assertEquals(puppyWebhook.get("operationTagParentBaseName"), "Dogs");
-            Assert.assertEquals(puppyWebhook.get("operationTagAncestors"), Arrays.asList(
-                    Map.of("name", "pets", "baseName", "Pets"),
-                    Map.of("name", "dogs", "baseName", "Dogs")));
+            WebhooksMap webhookPet = webhooksByTag.get("WebhookPet");
+            Assert.assertNotNull(webhookPet);
+            Assert.assertEquals(webhookPet.get("operationTagSummary"), "Webhook Pet Summary");
+            Assert.assertEquals(webhookPet.get("operationTagKind"), "nav");
+            Assert.assertEquals(webhookPet.get("operationTagParent"), "pet-store");
+            Assert.assertEquals(webhookPet.get("operationTagParentBaseName"), "PetStore");
+            // 'pet-store' has no webhook operations, so it is marked hasOperations=false here
+            Assert.assertEquals(webhookPet.get("operationTagAncestors"),
+                    Collections.singletonList(Map.of("name", "pet-store", "baseName", "PetStore", "hasOperations", false)));
 
             Assert.assertEquals(countWarnContaining(listAppender, "is not a defined tag"), 2);
             Assert.assertEquals(countWarnContaining(listAppender, "Circular tag parent reference"), 3);
@@ -1352,8 +1349,8 @@ public class DefaultGeneratorTest {
         }
         Assert.assertNotNull(puppies);
         Assert.assertEquals(puppies.get("operationTagAncestors"), Arrays.asList(
-                Map.of("name", "pets", "baseName", "Pets"),
-                Map.of("name", "dogs", "baseName", "Dogs")));
+                Map.of("name", "pets", "baseName", "Pets", "hasOperations", true, "classname", "PetsApi"),
+                Map.of("name", "dogs", "baseName", "Dogs", "hasOperations", true, "classname", "DogsApi")));
 
         // reparent 'puppies' under 'pets' on the same OpenAPI instance and regenerate:
         // the new parent must be reflected because chains are built per call
@@ -1373,7 +1370,7 @@ public class DefaultGeneratorTest {
         Assert.assertNotNull(regeneratedPuppies);
         Assert.assertEquals(regeneratedPuppies.get("operationTagParent"), "pets");
         Assert.assertEquals(regeneratedPuppies.get("operationTagAncestors"),
-                Collections.singletonList(Map.of("name", "pets", "baseName", "Pets")));
+                Collections.singletonList(Map.of("name", "pets", "baseName", "Pets", "hasOperations", true, "classname", "PetsApi")));
     }
 
     private DefaultGenerator generatorGenerateRecursiveDependentModelsBackwardCompatibility(String recursively) throws IOException {
